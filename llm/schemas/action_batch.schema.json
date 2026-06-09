@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["actions"],
+  "properties": {
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["msg_id", "sender", "action_type", "evidence_text", "evidence_msg_ids", "confidence"],
+        "properties": {
+          "msg_id": { "type": "string" },
+          "sender": { "type": "string" },
+          "action_type": { "type": "string" },
+          "emotion": { "type": "string" },
+          "intent": { "type": "string" },
+          "target": { "type": "string" },
+          "evidence_text": { "type": "string" },
+          "evidence_msg_ids": { "type": "array", "items": { "type": "string" } },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "uncertainty": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

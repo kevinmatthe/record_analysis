@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["event_type", "topic", "result", "evidence_msg_ids", "confidence"],
+  "properties": {
+    "event_type": { "type": "string" },
+    "topic": { "type": "string" },
+    "trigger": { "type": "string" },
+    "process": { "type": "array", "items": { "type": "string" } },
+    "result": { "type": "string" },
+    "repair_status": { "type": "string" },
+    "repair_initiator": { "type": "string" },
+    "evidence_msg_ids": { "type": "array", "items": { "type": "string" } },
+    "evidence_action_ids": { "type": "array", "items": { "type": "string" } },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "uncertainty": { "type": "string" }
+  },
+  "additionalProperties": false
+}

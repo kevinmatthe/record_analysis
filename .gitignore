@@ -1,0 +1,8 @@
+.data/
+__pycache__/
+.pytest_cache/
+*.pyc
+.dev/config.toml
+web/dist/
+web/node_modules/
+web/tsconfig.tsbuildinfo

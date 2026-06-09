@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["report_markdown", "evidence_event_ids", "evidence_msg_ids", "confidence"],
+  "properties": {
+    "report_markdown": { "type": "string" },
+    "evidence_event_ids": { "type": "array", "items": { "type": "string" } },
+    "evidence_msg_ids": { "type": "array", "items": { "type": "string" } },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "uncertainty": { "type": "string" }
+  },
+  "additionalProperties": false
+}

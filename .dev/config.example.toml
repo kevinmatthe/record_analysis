@@ -1,0 +1,38 @@
+[ark_config]
+# OpenAI-compatible base URL. For Ark/Volc-style gateways, set the compatible endpoint here.
+base_url = "https://api.openai.com"
+api_key = "replace-with-api-key"
+
+# Model profiles follow the BetaGo_v2 ark_config shape.
+normal_model = "replace-with-normal-model"
+reasoning_model = "replace-with-reasoning-model"
+lite_model = "replace-with-lite-model"
+vision_model = "replace-with-vision-model"
+chunk_model = "replace-with-chunk-model"
+embedding_model = "replace-with-embedding-model"
+batch_embedding_model = "replace-with-batch-embedding-model"
+
+[db_config]
+# Use an independent database for this project. Do not point this at BetaGo's DB.
+host = "localhost"
+port = 5432
+user = "postgres"
+password = "replace-with-password"
+dbname = "record_analysis"
+sslmode = "disable"
+timezone = "Asia/Shanghai"
+application_name = "record_analysis"
+
+[minio_config]
+bucket = "record-analysis"
+ak = "replace-with-access-key"
+sk = "replace-with-secret-key"
+expire_time = "168h"
+
+[minio_config.internal]
+endpoint = "minio.internal:9000"
+use_ssl = false
+
+[minio_config.external]
+endpoint = "minio.example.com:9443"
+use_ssl = true
