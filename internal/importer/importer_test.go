@@ -4,9 +4,9 @@ import "testing"
 
 func TestParseChatFileSupportsTxtCsvAndJson(t *testing.T) {
 	formats := []string{
-		"../../records/常青藤/chat.txt",
-		"../../records/常青藤/chat.csv",
-		"../../records/常青藤/chat.json",
+		"../../records/某人/chat.txt",
+		"../../records/某人/chat.csv",
+		"../../records/某人/chat.json",
 	}
 
 	for _, path := range formats {
@@ -24,7 +24,7 @@ func TestParseChatFileSupportsTxtCsvAndJson(t *testing.T) {
 }
 
 func TestParseChatFileCanFilterSystemMessages(t *testing.T) {
-	messages, err := ParseChatFile("../../records/常青藤/chat.csv", "rel_test", false)
+	messages, err := ParseChatFile("../../records/某人/chat.csv", "rel_test", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,11 +42,11 @@ func TestParseChatFileCanFilterSystemMessages(t *testing.T) {
 }
 
 func TestParseChatFilePreservesUTF8ChineseContent(t *testing.T) {
-	messages, err := ParseChatFile("../../records/常青藤/chat.csv", "rel_test", false)
+	messages, err := ParseChatFile("../../records/某人/chat.csv", "rel_test", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if messages[0].Content != "中招了   鸥哥给我轰炸了" {
+	if messages[0].Content != "我通过了你的朋友验证请求，现在我们可以开始聊天了" {
 		t.Fatalf("content = %q", messages[0].Content)
 	}
 	if messages[0].MsgType != "文本" {

@@ -43,6 +43,19 @@ export type AnalysisJob = {
   result?: AnalysisRecord;
 };
 
+export type SystemStatus = {
+  postgres: {
+    enabled: boolean;
+  };
+  opensearch: {
+    enabled: boolean;
+    healthy: boolean;
+    degraded: boolean;
+    reason?: string;
+    url?: string;
+  };
+};
+
 export type TimelineBucket = {
   id: string;
   granularity: string;
@@ -54,6 +67,12 @@ export type TimelineBucket = {
   first_message_id: string;
   last_message_id: string;
   preview: string;
+  analysis_status?: string;
+  word_cloud_status?: string;
+  summary_status?: string;
+  summary_title?: string;
+  summary_topics?: string[];
+  total_tokens?: number;
 };
 
 export type TimelineGranularity = 'year' | 'month' | 'week' | 'day' | 'hour' | '15m' | '5m';
@@ -158,6 +177,10 @@ export type PreviewPage = {
   total_pages: number;
 };
 
+export type MessageSearchPage = PreviewPage & {
+  source: string;
+};
+
 export type Metrics = {
   metrics?: Record<string, unknown>;
 };
@@ -251,6 +274,10 @@ export function getJob(id: string) {
   return request<AnalysisJob>(`/api/jobs/${encodeURIComponent(id)}`);
 }
 
+export function getSystemStatus() {
+  return request<SystemStatus>('/api/system/status');
+}
+
 export function listJobs(relationshipID: string) {
   const params = new URLSearchParams();
   if (relationshipID.trim()) {
@@ -279,6 +306,21 @@ export function getTimelineBucketMessages(id: string, bucketID: string, page: nu
   return request<PreviewPage>(
     `/api/jobs/${encodeURIComponent(id)}/timeline/${encodeURIComponent(bucketID)}/messages?page=${page}&page_size=${pageSize}`,
   );
+}
+
+export function searchJobMessages(
+  id: string,
+  query: string,
+  page: number,
+  pageSize: number,
+  range?: { start: string; end: string } | null,
+) {
+  const params = new URLSearchParams({ q: query, page: String(page), page_size: String(pageSize) });
+  if (range) {
+    params.set('start_time', range.start);
+    params.set('end_time', range.end);
+  }
+  return request<MessageSearchPage>(`/api/jobs/${encodeURIComponent(id)}/messages/search?${params.toString()}`);
 }
 
 export function previewJobBranch(

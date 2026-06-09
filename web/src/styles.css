@@ -146,6 +146,54 @@ nav button:hover,
   gap: 0.75rem;
 }
 
+.systemStatusPanel {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 0.5rem;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 0.75rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.systemStatusPanel div {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.systemStatusPanel span,
+.systemStatusPanel p {
+  color: #a8b4bf;
+  font-size: 0.76rem;
+}
+
+.systemStatusPanel p {
+  margin: 0;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.systemStatusPanel strong {
+  border-radius: 999px;
+  padding: 0.12rem 0.45rem;
+  font-size: 0.72rem;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.systemStatusPanel .ok,
+.systemStatusPanel .healthy {
+  color: #bbf7d0;
+}
+
+.systemStatusPanel .degraded {
+  color: #fde68a;
+}
+
+.systemStatusPanel .off {
+  color: #cbd5e1;
+}
+
 .workspace {
   min-width: 0;
 }
@@ -429,6 +477,13 @@ select:focus {
   color: var(--muted);
   min-width: 4rem;
   text-align: center;
+}
+
+.searchInline {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
 }
 
 .previewList {
@@ -978,9 +1033,30 @@ select:focus {
   background: #fef3c7;
 }
 
+.workStatus.queued {
+  color: #4c1d95;
+  background: #ede9fe;
+}
+
 .workStatus.failed {
   color: var(--danger);
   background: #fee2e2;
+}
+
+.bucketStatusStrip,
+.topicChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.topicChips span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  padding: 0.2rem 0.55rem;
+  font-size: 0.75rem;
 }
 
 .wordCloudTerms {

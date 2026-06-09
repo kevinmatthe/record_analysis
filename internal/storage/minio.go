@@ -24,7 +24,7 @@ type MinioObjectStore struct {
 }
 
 func (c MinioConfig) Enabled() bool {
-	return c.Internal.Endpoint != "" && c.External.Endpoint != "" && c.AccessKey != "" && c.SecretKey != ""
+	return c.Internal.Endpoint != "" && c.External.Endpoint != "" && c.resolvedAccessKey() != "" && c.resolvedSecretKey() != ""
 }
 
 func NewMinioObjectStore(config MinioConfig) (*MinioObjectStore, error) {
@@ -35,20 +35,34 @@ func NewMinioObjectStore(config MinioConfig) (*MinioObjectStore, error) {
 		config.Bucket = defaultMinioBucket
 	}
 	internal, err := minio.New(config.Internal.Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(config.AccessKey, config.SecretKey, ""),
+		Creds:  credentials.NewStaticV4(config.resolvedAccessKey(), config.resolvedSecretKey(), ""),
 		Secure: config.Internal.UseSSL,
 	})
 	if err != nil {
 		return nil, err
 	}
 	external, err := minio.New(config.External.Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(config.AccessKey, config.SecretKey, ""),
+		Creds:  credentials.NewStaticV4(config.resolvedAccessKey(), config.resolvedSecretKey(), ""),
 		Secure: config.External.UseSSL,
 	})
 	if err != nil {
 		return nil, err
 	}
 	return &MinioObjectStore{internal: internal, external: external, config: config}, nil
+}
+
+func (c MinioConfig) resolvedAccessKey() string {
+	if c.AccessKey != "" {
+		return c.AccessKey
+	}
+	return c.AccessKeyID
+}
+
+func (c MinioConfig) resolvedSecretKey() string {
+	if c.SecretKey != "" {
+		return c.SecretKey
+	}
+	return c.SecretKeyID
 }
 
 func (s *MinioObjectStore) PutChatFile(path string, relationshipID string) (StoredObject, error) {

@@ -19,6 +19,7 @@ import (
 	"github.com/kevinmatthe/record_analysis/internal/importer"
 	"github.com/kevinmatthe/record_analysis/internal/llm"
 	"github.com/kevinmatthe/record_analysis/internal/model"
+	"github.com/kevinmatthe/record_analysis/internal/search"
 	"github.com/kevinmatthe/record_analysis/internal/service"
 )
 
@@ -40,6 +41,7 @@ type Options struct {
 	AuthPassword   string
 	AllowedOrigin  string
 	Store          *PostgresStore
+	Indexer        search.Indexer
 }
 
 type Handler struct {
@@ -49,6 +51,7 @@ type Handler struct {
 	jobs     map[string]*AnalysisJob
 	branches map[string]*AnalysisBranch
 	store    *PostgresStore
+	indexer  search.Indexer
 	mu       sync.Mutex
 }
 
@@ -56,7 +59,11 @@ func NewHandler(svc *service.ChatAnalysisService, options Options) http.Handler 
 	if options.MaxUploadBytes <= 0 {
 		options.MaxUploadBytes = 64 << 20
 	}
-	h := &Handler{svc: svc, options: options, sessions: map[string]time.Time{}, jobs: map[string]*AnalysisJob{}, branches: map[string]*AnalysisBranch{}, store: options.Store}
+	indexer := options.Indexer
+	if indexer == nil {
+		indexer = search.NoopIndexer{}
+	}
+	h := &Handler{svc: svc, options: options, sessions: map[string]time.Time{}, jobs: map[string]*AnalysisJob{}, branches: map[string]*AnalysisBranch{}, store: options.Store, indexer: indexer}
 	if h.store != nil {
 		go h.runWorkItemWorker()
 	}
@@ -69,10 +76,24 @@ func NewHandler(svc *service.ChatAnalysisService, options Options) http.Handler 
 	mux.HandleFunc("/api/analyze", h.withCORS(h.requireAuth(h.analyzeHandler)))
 	mux.HandleFunc("/api/analyses", h.withCORS(h.requireAuth(h.analysesHandler)))
 	mux.HandleFunc("/api/analyses/", h.withCORS(h.requireAuth(h.analysisDetailHandler)))
+	mux.HandleFunc("/api/system/status", h.withCORS(h.requireAuth(h.systemStatusHandler)))
 	mux.HandleFunc("/api/jobs", h.withCORS(h.requireAuth(h.jobsHandler)))
 	mux.HandleFunc("/api/jobs/", h.withCORS(h.requireAuth(h.jobDetailHandler)))
 	mux.HandleFunc("/api/branches/", h.withCORS(h.requireAuth(h.branchDetailHandler)))
 	return mux
+}
+
+func (h *Handler) systemStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"postgres": map[string]interface{}{
+			"enabled": h.store != nil,
+		},
+		"opensearch": h.indexer.Status(r.Context()),
+	})
 }
 
 func (h *Handler) withCORS(next http.HandlerFunc) http.HandlerFunc {
@@ -321,6 +342,9 @@ func (h *Handler) jobsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err := h.indexer.IndexMessages(r.Context(), search.MessageDocuments(job.ID, job.RelationshipID, messages)); err != nil {
+		h.updateJob(job.ID, JobStatusQueued, "OpenSearch 索引失败，已降级到 Postgres 查询："+err.Error(), 0.1, 0, nil)
+	}
 	go h.runAnalysisJob(job.ID, request)
 	writeJSON(w, http.StatusAccepted, cloneJob(job))
 }
@@ -374,6 +398,10 @@ func (h *Handler) jobDetailHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if suffix == "work-items" && r.Method == http.MethodGet {
 			h.handleListWorkItems(w, r, id)
+			return
+		}
+		if suffix == "messages/search" && r.Method == http.MethodGet {
+			h.handleSearchMessages(w, r, id, true)
 			return
 		}
 		if suffix == "work-items/seed" && r.Method == http.MethodPost {
@@ -512,6 +540,12 @@ func (h *Handler) jobDetailHandler(w http.ResponseWriter, r *http.Request) {
 		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 		pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
 		writeJSON(w, http.StatusOK, previewPage(filtered, page, pageSize))
+		return
+	}
+	if suffix == "messages/search" && r.Method == http.MethodGet {
+		messages := append([]model.Message(nil), job.messages...)
+		h.mu.Unlock()
+		h.handleSearchMessagesFromMessages(w, r, id, messages)
 		return
 	}
 	copy := cloneJob(job)
@@ -898,7 +932,9 @@ func (h *Handler) processSummaryMergeWorkItem(ctx context.Context, item Analysis
 	}
 	if err := h.store.CompleteWorkItemWithUsage(ctx, item.ID, merged, usage); err != nil {
 		_ = h.store.FailWorkItem(ctx, item.ID, err)
+		return true
 	}
+	h.indexWorkItemSummary(ctx, item, relationshipID, merged, usage)
 	return true
 }
 
@@ -940,8 +976,35 @@ func (h *Handler) processTopicSummaryWorkItem(ctx context.Context, item Analysis
 	}
 	if err := h.store.CompleteWorkItemWithUsage(ctx, item.ID, summary, usage); err != nil {
 		_ = h.store.FailWorkItem(ctx, item.ID, err)
+		return true
 	}
+	h.indexWorkItemSummary(ctx, item, relationshipID, summary, usage)
 	return true
+}
+
+func (h *Handler) indexWorkItemSummary(ctx context.Context, item AnalysisWorkItem, relationshipID string, result interface{}, usage llm.UsageEvent) {
+	data, err := json.Marshal(result)
+	if err != nil {
+		return
+	}
+	if err := h.indexer.IndexSummary(ctx, search.SummaryDocument{
+		ID:               item.ID,
+		JobID:            item.JobID,
+		RelationshipID:   relationshipID,
+		Kind:             item.Kind,
+		ScopeType:        item.ScopeType,
+		ScopeID:          item.ScopeID,
+		Granularity:      item.Granularity,
+		StartTime:        item.StartTime,
+		EndTime:          item.EndTime,
+		Status:           "completed",
+		Result:           json.RawMessage(data),
+		PromptTokens:     usage.PromptTokens,
+		CompletionTokens: usage.CompletionTokens,
+		TotalTokens:      usage.TotalTokens,
+	}); err != nil && h.store != nil {
+		_ = h.store.AddJobEvent(ctx, item.JobID, "OpenSearch 摘要索引失败，已保留 Postgres 结果："+err.Error())
+	}
 }
 
 func (h *Handler) handleBranchPreview(w http.ResponseWriter, r *http.Request, jobID string, fromStore bool) {
@@ -1140,6 +1203,108 @@ func (h *Handler) handleListWorkItems(w http.ResponseWriter, r *http.Request, jo
 	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
 }
 
+func (h *Handler) handleSearchMessages(w http.ResponseWriter, r *http.Request, jobID string, fromStore bool) {
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	start, end, err := parseTimelineRange(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	result, err := h.indexer.SearchMessages(r.Context(), search.MessageSearchRequest{
+		JobID:    jobID,
+		Query:    query,
+		Start:    start,
+		End:      end,
+		Page:     page,
+		PageSize: pageSize,
+	})
+	if err == nil {
+		writeJSON(w, http.StatusOK, searchResultToMessagePage(result))
+		return
+	}
+	if h.store == nil || !fromStore {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	messages, loadErr := h.store.jobMessagesInRange(r.Context(), jobID, start, end)
+	if loadErr != nil {
+		writeError(w, http.StatusInternalServerError, loadErr)
+		return
+	}
+	writeJSON(w, http.StatusOK, messageSearchPage(filterMessagesByQuery(messages, query), page, pageSize, "postgres"))
+}
+
+func (h *Handler) handleSearchMessagesFromMessages(w http.ResponseWriter, r *http.Request, jobID string, messages []model.Message) {
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	start, end, err := parseTimelineRange(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	messages = service.FilterMessagesByTimeRange(messages, start, end)
+	result, err := h.indexer.SearchMessages(r.Context(), search.MessageSearchRequest{
+		JobID:    jobID,
+		Query:    query,
+		Start:    start,
+		End:      end,
+		Page:     page,
+		PageSize: pageSize,
+	})
+	if err == nil {
+		writeJSON(w, http.StatusOK, searchResultToMessagePage(result))
+		return
+	}
+	writeJSON(w, http.StatusOK, messageSearchPage(filterMessagesByQuery(messages, query), page, pageSize, "memory"))
+}
+
+func searchResultToMessagePage(result search.MessageSearchResult) MessageSearchPage {
+	items := make([]MessagePreview, 0, len(result.Items))
+	for _, doc := range result.Items {
+		content := doc.Content
+		if len([]rune(content)) > 160 {
+			content = string([]rune(content)[:160]) + "..."
+		}
+		sender := doc.DisplaySender
+		if sender == "" {
+			sender = doc.Sender
+		}
+		items = append(items, MessagePreview{
+			ID:      doc.MessageID,
+			Sender:  sender,
+			Time:    doc.MessageTime.Format("2006-01-02 15:04:05"),
+			Type:    doc.MessageType,
+			Content: content,
+		})
+	}
+	return MessageSearchPage{
+		Items:      items,
+		Total:      result.Total,
+		Page:       result.Page,
+		PageSize:   result.PageSize,
+		TotalPages: result.TotalPages,
+		Source:     result.Source,
+	}
+}
+
+func filterMessagesByQuery(messages []model.Message, query string) []model.Message {
+	query = strings.TrimSpace(strings.ToLower(query))
+	if query == "" {
+		return messages
+	}
+	filtered := make([]model.Message, 0)
+	for _, message := range messages {
+		if strings.Contains(strings.ToLower(message.Content), query) ||
+			strings.Contains(strings.ToLower(message.DisplaySender()), query) {
+			filtered = append(filtered, message)
+		}
+	}
+	return filtered
+}
+
 func (h *Handler) handleCreateSummaryMergeWorkItem(w http.ResponseWriter, r *http.Request, jobID string) {
 	if h.store == nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("work item store unavailable"))
@@ -1326,7 +1491,48 @@ func (h *Handler) runBranch(branchID string, messages []model.Message, mode stri
 		branch.ModelName = result.Report.ModelName
 		branch.Stage = "片段分析完成"
 	})
+	h.indexBranchReport(context.Background(), branchID)
 	_ = persist
+}
+
+func (h *Handler) indexBranchReport(ctx context.Context, branchID string) {
+	var branch AnalysisBranch
+	if h.store != nil {
+		loaded, err := h.store.GetBranch(ctx, branchID)
+		if err != nil {
+			return
+		}
+		branch = loaded
+	} else {
+		h.mu.Lock()
+		if h.branches[branchID] != nil {
+			branch = *h.branches[branchID]
+		}
+		h.mu.Unlock()
+	}
+	if branch.ID == "" {
+		return
+	}
+	if err := h.indexer.IndexBranch(ctx, search.BranchDocument{
+		ID:               branch.ID,
+		JobID:            branch.JobID,
+		RelationshipID:   branch.RelationshipID,
+		Title:            branch.Title,
+		Granularity:      branch.Granularity,
+		StartTime:        branch.StartTime,
+		EndTime:          branch.EndTime,
+		MessageCount:     branch.MessageCount,
+		TopicHint:        branch.TopicHint,
+		Status:           branch.Status,
+		Stage:            branch.Stage,
+		ReportMarkdown:   branch.ReportMarkdown,
+		ModelName:        branch.ModelName,
+		PromptTokens:     branch.PromptTokens,
+		CompletionTokens: branch.CompletionTokens,
+		TotalTokens:      branch.TotalTokens,
+	}); err != nil && h.store != nil {
+		_ = h.store.AddJobEvent(ctx, branch.JobID, "OpenSearch Branch 索引失败，已保留 Postgres 结果："+err.Error())
+	}
 }
 
 func (h *Handler) updateBranch(branchID string, status string, stage string, progress float64, mutate func(branch *AnalysisBranch)) {

@@ -112,6 +112,15 @@ type PreviewPage struct {
 	TotalPages int              `json:"total_pages"`
 }
 
+type MessageSearchPage struct {
+	Items      []MessagePreview `json:"items"`
+	Total      int              `json:"total"`
+	Page       int              `json:"page"`
+	PageSize   int              `json:"page_size"`
+	TotalPages int              `json:"total_pages"`
+	Source     string           `json:"source"`
+}
+
 func cloneJob(job *AnalysisJob) AnalysisJob {
 	copy := *job
 	copy.Events = append([]JobEvent(nil), job.Events...)
@@ -121,6 +130,18 @@ func cloneJob(job *AnalysisJob) AnalysisJob {
 		copy.Result = &record
 	}
 	return copy
+}
+
+func messageSearchPage(messages []model.Message, page int, pageSize int, source string) MessageSearchPage {
+	preview := previewPage(messages, page, pageSize)
+	return MessageSearchPage{
+		Items:      preview.Items,
+		Total:      preview.Total,
+		Page:       preview.Page,
+		PageSize:   preview.PageSize,
+		TotalPages: preview.TotalPages,
+		Source:     source,
+	}
 }
 
 func previewPage(messages []model.Message, page int, pageSize int) PreviewPage {

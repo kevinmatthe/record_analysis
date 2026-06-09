@@ -1,0 +1,23 @@
+[db_config]
+host = "postgres"
+port = 5432
+user = "record_analysis"
+password = "record_analysis"
+dbname = "record_analysis"
+sslmode = "disable"
+timezone = "Asia/Shanghai"
+application_name = "record_analysis"
+
+[minio_config]
+bucket = "record-analysis"
+ak = "record_analysis_minio"
+sk = "record_analysis_minio_secret"
+expire_time = "168h"
+
+[minio_config.internal]
+endpoint = "minio:9000"
+use_ssl = false
+
+[minio_config.external]
+endpoint = "localhost:9000"
+use_ssl = false

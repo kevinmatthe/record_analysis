@@ -26,12 +26,14 @@ type EndpointConfig struct {
 }
 
 type MinioConfig struct {
-	Internal   EndpointConfig `json:"internal" yaml:"internal" toml:"internal"`
-	External   EndpointConfig `json:"external" yaml:"external" toml:"external"`
-	AccessKey  string         `json:"ak" yaml:"ak" toml:"ak"`
-	SecretKey  string         `json:"sk" yaml:"sk" toml:"sk"`
-	ExpireTime string         `json:"expire_time" yaml:"expire_time" toml:"expire_time"`
-	Bucket     string         `json:"bucket" yaml:"bucket" toml:"bucket"`
+	Internal    EndpointConfig `json:"internal" yaml:"internal" toml:"internal"`
+	External    EndpointConfig `json:"external" yaml:"external" toml:"external"`
+	AccessKey   string         `json:"ak" yaml:"ak" toml:"ak"`
+	AccessKeyID string         `json:"ak_id" yaml:"ak_id" toml:"ak_id"`
+	SecretKey   string         `json:"sk" yaml:"sk" toml:"sk"`
+	SecretKeyID string         `json:"secret_key" yaml:"secret_key" toml:"secret_key"`
+	ExpireTime  string         `json:"expire_time" yaml:"expire_time" toml:"expire_time"`
+	Bucket      string         `json:"bucket" yaml:"bucket" toml:"bucket"`
 }
 
 type LocalObjectStore struct {

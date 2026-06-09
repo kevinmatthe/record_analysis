@@ -9,7 +9,7 @@ import (
 func TestAnalyzeRequiresLLMBaseURLAndModelTogether(t *testing.T) {
 	err := run([]string{
 		"analyze",
-		"../../records/常青藤/chat.csv",
+		"../../records/某人/chat.csv",
 		"--relationship-id", "rel_test",
 		"--llm-base-url", "http://localhost:1234",
 	})

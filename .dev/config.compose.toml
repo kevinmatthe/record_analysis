@@ -1,0 +1,25 @@
+[db_config]
+host = "postgres"
+port = 5432
+user = "record_analysis"
+password = "record_analysis"
+dbname = "record_analysis"
+sslmode = "disable"
+timezone = "Asia/Shanghai"
+application_name = "record_analysis"
+
+[opensearch_config]
+# Optional. When unavailable, API keeps using Postgres timeline/search fallbacks.
+domain = "opensearch"
+user = "admin"
+password = "admin"
+lark_msg_index = "record_analysis_messages"
+lark_chunk_index = "record_analysis_summaries"
+lark_card_action_index = "record_analysis_card_actions"
+
+# MinIO is intentionally omitted for the default compose profile. The service
+# falls back to the local object store mounted at /app/.data/objects.
+#
+# To use MinIO, start the optional service with:
+# docker compose --profile minio up --build
+# Then add the minio_config block from config.compose.minio.toml.

@@ -71,6 +71,67 @@ bucket = "record-analysis"
 	}
 }
 
+func TestLoadFileReadsBetaGoStyleOpenSearchConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	err := os.WriteFile(path, []byte(`
+[opensearch_config]
+domain = "localhost"
+user = "kevinmatt"
+password = "secret"
+lark_card_action_index = "lark_card_action"
+lark_chunk_index = "conversations_chunks"
+lark_msg_index = "lark_msg_index_jieba"
+`), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.OpenSearchConfig.Domain != "localhost" {
+		t.Fatalf("domain = %q", cfg.OpenSearchConfig.Domain)
+	}
+	if cfg.OpenSearchConfig.LarkMsgIndex != "lark_msg_index_jieba" {
+		t.Fatalf("lark msg index = %q", cfg.OpenSearchConfig.LarkMsgIndex)
+	}
+	searchCfg := cfg.SearchConfig()
+	if searchCfg == nil {
+		t.Fatal("search config should be enabled")
+	}
+	if searchCfg.RecordMessageIndex != "lark_msg_index_jieba" {
+		t.Fatalf("record message index = %q", searchCfg.RecordMessageIndex)
+	}
+	if searchCfg.RecordSummaryIndex != "conversations_chunks" {
+		t.Fatalf("record summary index = %q", searchCfg.RecordSummaryIndex)
+	}
+}
+
+func TestLoadFileAcceptsApplicationNameAlias(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	err := os.WriteFile(path, []byte(`
+[db_config]
+applicationName = "betago_v2"
+dbname = "record_analysis"
+host = "localhost"
+user = "postgres"
+`), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.DBConfig.ApplicationName != "betago_v2" {
+		t.Fatalf("application name = %q", cfg.DBConfig.ApplicationName)
+	}
+}
+
 func TestLoadPathUsesRecordAnalysisConfigPath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	t.Setenv("RECORD_ANALYSIS_CONFIG_PATH", path)

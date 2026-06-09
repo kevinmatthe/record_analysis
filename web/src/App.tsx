@@ -24,7 +24,9 @@ import {
   AnalysisRecord,
   AnalysisWorkItem,
   BranchPreview,
+  MessageSearchPage,
   PreviewPage,
+  SystemStatus,
   TimelineBucket,
   TimelineCluster,
   TimelineGranularity,
@@ -38,6 +40,7 @@ import {
   getTimelineBucketMessages,
   getMe,
   getReport,
+  getSystemStatus,
   listAnalyses,
   listJobBranches,
   listJobs,
@@ -48,6 +51,7 @@ import {
   previewJobBranch,
   register,
   runJobBranch,
+  searchJobMessages,
   seedWorkItems,
 } from './api';
 
@@ -66,6 +70,7 @@ export function App() {
   const [selectedJob, setSelectedJob] = useState<AnalysisJob | null>(null);
   const [selectedRecord, setSelectedRecord] = useState<AnalysisRecord | null>(null);
   const [report, setReport] = useState('');
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [historyFilter, setHistoryFilter] = useState('');
   const [historyLoading, setHistoryLoading] = useState(false);
 
@@ -90,6 +95,7 @@ export function App() {
     if (route.view === 'history') {
       void refreshHistory();
     }
+    void getSystemStatus().then(setSystemStatus).catch(() => setSystemStatus(null));
     if (route.view === 'job' && route.jobID) {
       void openJobByID(route.jobID);
     }
@@ -179,6 +185,7 @@ export function App() {
             <Lock size={18} /> 账号设置
           </button>
         </nav>
+        {systemStatus && <SystemStatusPanel status={systemStatus} />}
         <div className="sidebarFooter">
           <span>{user}</span>
           <button className="iconText" onClick={handleLogout}>
@@ -227,6 +234,23 @@ function Splash() {
   return (
     <div className="centerScreen">
       <Loader2 className="spin" size={28} />
+    </div>
+  );
+}
+
+function SystemStatusPanel({ status }: { status: SystemStatus }) {
+  const osStatus = status.opensearch.healthy ? 'healthy' : status.opensearch.enabled ? 'degraded' : 'off';
+  return (
+    <div className="systemStatusPanel">
+      <div>
+        <span>Postgres</span>
+        <strong className={status.postgres.enabled ? 'ok' : 'off'}>{status.postgres.enabled ? 'enabled' : 'fallback'}</strong>
+      </div>
+      <div>
+        <span>OpenSearch</span>
+        <strong className={osStatus}>{osStatus}</strong>
+      </div>
+      {status.opensearch.reason && <p>{status.opensearch.reason}</p>}
     </div>
   );
 }
@@ -621,6 +645,10 @@ function JobDetailPage({
   const [runningBranchID, setRunningBranchID] = useState<string | null>(null);
   const [bucketMessages, setBucketMessages] = useState<PreviewPage | null>(null);
   const [bucketPage, setBucketPage] = useState(1);
+  const [messageSearchQuery, setMessageSearchQuery] = useState('');
+  const [messageSearchPage, setMessageSearchPage] = useState(1);
+  const [messageSearchResults, setMessageSearchResults] = useState<MessageSearchPage | null>(null);
+  const [searchingMessages, setSearchingMessages] = useState(false);
   const [loadingTimeline, setLoadingTimeline] = useState(false);
 
   useEffect(() => {
@@ -661,6 +689,10 @@ function JobDetailPage({
   useEffect(() => {
     setBucketPage(1);
   }, [selectedBucket?.id]);
+
+  useEffect(() => {
+    setMessageSearchPage(1);
+  }, [messageSearchQuery, branchPreview?.start_time, branchPreview?.end_time]);
 
   useEffect(() => {
     if (!job) {
@@ -868,6 +900,18 @@ function JobDetailPage({
       setMergeItems((current) => [item, ...current.filter((candidate) => candidate.id !== item.id)]);
     } finally {
       setCreatingMergeSummary(false);
+    }
+  }
+
+  async function runMessageSearch(page = messageSearchPage) {
+    if (!job) return;
+    setSearchingMessages(true);
+    try {
+      const data = await searchJobMessages(job.id, messageSearchQuery, page, 10, currentAnalysisRange());
+      setMessageSearchResults(data);
+      setMessageSearchPage(data.page);
+    } finally {
+      setSearchingMessages(false);
     }
   }
 
@@ -1086,7 +1130,16 @@ function JobDetailPage({
                       <span>参与人</span>
                       <strong>{selectedBucket.participant_count}</strong>
                     </div>
+                    <div className="metric">
+                      <span>摘要状态</span>
+                      <strong>{selectedBucket.summary_status || 'unseen'}</strong>
+                    </div>
+                    <div className="metric">
+                      <span>Token</span>
+                      <strong>{selectedBucket.total_tokens || 0}</strong>
+                    </div>
                   </div>
+                  <BucketStatusStrip bucket={selectedBucket} />
                   <div className="participantChips">
                     {Object.entries(selectedBucket.participant_messages).map(([name, count]) => (
                       <div className="participantChip" key={name}>
@@ -1095,7 +1148,14 @@ function JobDetailPage({
                       </div>
                     ))}
                   </div>
-                  <div className="bucketPreviewText">{selectedBucket.preview || '该时间桶没有可展示摘要。'}</div>
+                  <div className="bucketPreviewText">{selectedBucket.summary_title || selectedBucket.preview || '该时间桶没有可展示摘要。'}</div>
+                  {selectedBucket.summary_topics && selectedBucket.summary_topics.length > 0 && (
+                    <div className="topicChips">
+                      {selectedBucket.summary_topics.slice(0, 5).map((topic) => (
+                        <span key={topic}>{topic}</span>
+                      ))}
+                    </div>
+                  )}
                   <WordCloudPanel title={selectedWordCloudTitle} items={selectedWorkItems} onPrioritize={(item) => void prioritizeSelectedWorkItem(item)} />
                 </>
               ) : (
@@ -1178,6 +1238,59 @@ function JobDetailPage({
                   ))}
                   {selectedBucket && bucketMessages && bucketMessages.items.length === 0 && <div className="empty">这个时间桶没有消息</div>}
                 </div>
+              </div>
+
+              <div className="panel previewPanel compact">
+                <div className="previewHeader">
+                  <div>
+                    <h2>消息搜索</h2>
+                    <p>{messageSearchResults ? `${messageSearchResults.total} 条 · ${messageSearchResults.source}` : '按当前片段或时间桶搜索'}</p>
+                  </div>
+                </div>
+                <div className="searchInline">
+                  <input
+                    value={messageSearchQuery}
+                    onChange={(event) => setMessageSearchQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') void runMessageSearch(1);
+                    }}
+                    placeholder="搜索消息内容或发送者"
+                  />
+                  <button className="secondary" disabled={searchingMessages} onClick={() => void runMessageSearch(1)}>
+                    {searchingMessages ? <Loader2 className="spin" size={16} /> : <Search size={16} />} 搜索
+                  </button>
+                </div>
+                <div className="previewList">
+                  {(messageSearchResults?.items ?? []).map((message) => (
+                    <div className="previewRow" key={message.id}>
+                      <span>{message.time}</span>
+                      <strong>{message.sender}</strong>
+                      <p>{message.content}</p>
+                    </div>
+                  ))}
+                  {messageSearchResults && messageSearchResults.items.length === 0 && <div className="empty">没有搜索结果</div>}
+                </div>
+                {messageSearchResults && messageSearchResults.total_pages > 1 && (
+                  <div className="previewControls">
+                    <button
+                      className="secondary"
+                      disabled={messageSearchPage <= 1 || searchingMessages}
+                      onClick={() => void runMessageSearch(messageSearchPage - 1)}
+                    >
+                      上一页
+                    </button>
+                    <span>
+                      {messageSearchResults.page} / {messageSearchResults.total_pages}
+                    </span>
+                    <button
+                      className="secondary"
+                      disabled={messageSearchPage >= messageSearchResults.total_pages || searchingMessages}
+                      onClick={() => void runMessageSearch(messageSearchPage + 1)}
+                    >
+                      下一页
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -1515,6 +1628,11 @@ function TimelineChart({
       bucket.id,
       bucket.end_time,
       bucket.preview,
+      bucket.analysis_status ?? 'unseen',
+      bucket.summary_status ?? '',
+      bucket.word_cloud_status ?? '',
+      bucket.summary_title ?? '',
+      bucket.total_tokens ?? 0,
     ]);
     const selectedStart = selectedRange ? new Date(selectedRange.start).getTime() : null;
     const selectedEnd = selectedRange ? new Date(selectedRange.end).getTime() : null;
@@ -1531,8 +1649,12 @@ function TimelineChart({
           const index = params.dataIndex as number;
           const bucket = chartBuckets[index];
           if (!bucket) return '';
-          const preview = bucket.preview ? `<br/><span style="color:#5f6f72">${escapeHtml(bucket.preview.slice(0, 80))}</span>` : '';
-          return `<strong>${formatBucketWindow(bucket)}</strong><br/>${bucket.message_count} 条消息 · ${bucket.participant_count} 人${preview}`;
+          const title = bucket.summary_title || bucket.preview;
+          const preview = title ? `<br/><span style="color:#5f6f72">${escapeHtml(title.slice(0, 80))}</span>` : '';
+          const summaryStatus = bucket.summary_status ? `<br/>摘要：${bucket.summary_status}` : '';
+          const wordCloudStatus = bucket.word_cloud_status ? ` · 词云：${bucket.word_cloud_status}` : '';
+          const tokens = bucket.total_tokens ? `<br/>${bucket.total_tokens} tokens` : '';
+          return `<strong>${formatBucketWindow(bucket)}</strong><br/>${bucket.message_count} 条消息 · ${bucket.participant_count} 人${summaryStatus}${wordCloudStatus}${tokens}${preview}`;
         },
       },
       brush: {
@@ -1603,7 +1725,7 @@ function TimelineChart({
             return Math.max(9, Math.min(30, 9 + (count / Math.max(bucketPeak, 1)) * 21));
           },
           itemStyle: {
-            color: (params: any) => (params.data?.[3] === selectedBucketID ? '#0a3f46' : '#15808c'),
+            color: (params: any) => bucketStatusColor(params.data?.[6], params.data?.[3] === selectedBucketID),
             borderColor: '#ffffff',
             borderWidth: 2,
             shadowBlur: 8,
@@ -1616,7 +1738,11 @@ function TimelineChart({
           label: {
             show: true,
             position: 'top',
-            formatter: (params: any) => String(params.data?.[2] ?? ''),
+            formatter: (params: any) => {
+              const count = String(params.data?.[2] ?? '');
+              const marker = bucketStatusMarker(params.data?.[6]);
+              return `${count}${marker}`;
+            },
             color: '#26383b',
             fontSize: 11,
           },
@@ -1781,6 +1907,54 @@ function granularityLabel(value: 'auto' | TimelineGranularity) {
     default:
       return '小时';
   }
+}
+
+function bucketStatusColor(status: unknown, selected: boolean) {
+  if (selected) return '#0a3f46';
+  switch (status) {
+    case 'running':
+      return '#c26a00';
+    case 'queued':
+      return '#6f5bd6';
+    case 'failed':
+      return '#b3261e';
+    case 'completed':
+      return '#20845a';
+    default:
+      return '#15808c';
+  }
+}
+
+function bucketStatusMarker(status: unknown) {
+  switch (status) {
+    case 'running':
+      return ' · 运行';
+    case 'queued':
+      return ' · 排队';
+    case 'failed':
+      return ' · 失败';
+    case 'completed':
+      return ' · 完成';
+    default:
+      return '';
+  }
+}
+
+function BucketStatusStrip({ bucket }: { bucket: TimelineBucket }) {
+  const entries = [
+    ['summary', bucket.summary_status || 'unseen'],
+    ['word cloud', bucket.word_cloud_status || 'unseen'],
+    ['analysis', bucket.analysis_status || 'unseen'],
+  ];
+  return (
+    <div className="bucketStatusStrip">
+      {entries.map(([label, status]) => (
+        <span className={`workStatus ${status}`} key={label}>
+          {label}: {status}
+        </span>
+      ))}
+    </div>
+  );
 }
 
 function uniqueBranches(branches: AnalysisBranch[]) {

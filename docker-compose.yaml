@@ -1,0 +1,61 @@
+version: "3.7"
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: record_analysis
+      POSTGRES_PASSWORD: record_analysis
+      POSTGRES_DB: record_analysis
+      TZ: Asia/Shanghai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U record_analysis -d record_analysis"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    depends_on:
+      - postgres
+    environment:
+      RECORD_ANALYSIS_CONFIG_PATH: /app/config/config.toml
+      RECORD_ANALYSIS_AUTH_USERNAME: admin
+      RECORD_ANALYSIS_AUTH_PASSWORD: secret123
+      TZ: Asia/Shanghai
+    command:
+      - serve
+      - --addr
+      - :8080
+      - --output-root
+      - /app/.data/reports
+      - --object-root
+      - /app/.data/objects
+      - --history-path
+      - /app/.data/analysis/index.jsonl
+      - --cors-origin
+      - http://localhost:5173
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./.dev/config.compose.toml:/app/config/config.toml:ro
+      - app_data:/app/.data
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    depends_on:
+      - api
+    ports:
+      - "5173:80"
+
+volumes:
+  postgres_data:
+  app_data:

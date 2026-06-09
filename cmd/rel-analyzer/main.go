@@ -12,6 +12,7 @@ import (
 
 	appconfig "github.com/kevinmatthe/record_analysis/internal/config"
 	"github.com/kevinmatthe/record_analysis/internal/llm"
+	"github.com/kevinmatthe/record_analysis/internal/search"
 	"github.com/kevinmatthe/record_analysis/internal/server"
 	"github.com/kevinmatthe/record_analysis/internal/service"
 	"github.com/kevinmatthe/record_analysis/internal/storage"
@@ -189,6 +190,7 @@ func runServe(args []string) error {
 		AuthPassword:   *authPassword,
 		AllowedOrigin:  *corsOrigin,
 		Store:          pgStore,
+		Indexer:        buildSearchIndexer(cfg),
 	})
 	fmt.Println("listening on " + *addr)
 	return http.ListenAndServe(*addr, handler)
@@ -244,11 +246,12 @@ func buildObjectStore(cfg cliConfig, objectRoot string) (storage.ObjectStore, er
 }
 
 type cliConfig struct {
-	LLMBaseURL  string
-	LLMModel    string
-	LLMAPIKey   string
-	MinioConfig *storage.MinioConfig
-	DBDSN       string
+	LLMBaseURL       string
+	LLMModel         string
+	LLMAPIKey        string
+	MinioConfig      *storage.MinioConfig
+	DBDSN            string
+	OpenSearchConfig *appconfig.OpenSearchConfig
 }
 
 func loadCLIConfig(path string, profile string) (cliConfig, error) {
@@ -267,12 +270,39 @@ func loadCLIConfig(path string, profile string) (cliConfig, error) {
 	}
 	llmCfg := cfg.LLMConfig(profile)
 	return cliConfig{
-		LLMBaseURL:  llmCfg.BaseURL,
-		LLMModel:    llmCfg.Model,
-		LLMAPIKey:   llmCfg.APIKey,
-		MinioConfig: cfg.ObjectStoreConfig(),
-		DBDSN:       cfg.DBDSN(),
+		LLMBaseURL:       llmCfg.BaseURL,
+		LLMModel:         llmCfg.Model,
+		LLMAPIKey:        llmCfg.APIKey,
+		MinioConfig:      cfg.ObjectStoreConfig(),
+		DBDSN:            cfg.DBDSN(),
+		OpenSearchConfig: cfg.SearchConfig(),
 	}, nil
+}
+
+func buildSearchIndexer(cfg cliConfig) search.Indexer {
+	if cfg.OpenSearchConfig == nil {
+		return search.NoopIndexer{}
+	}
+	indexer, err := search.NewOpenSearchIndexer(search.Config{
+		Domain:             cfg.OpenSearchConfig.Domain,
+		User:               cfg.OpenSearchConfig.User,
+		Password:           cfg.OpenSearchConfig.Password,
+		RecordMessageIndex: cfg.OpenSearchConfig.RecordMessageIndex,
+		RecordSummaryIndex: cfg.OpenSearchConfig.RecordSummaryIndex,
+		RecordBranchIndex:  cfg.OpenSearchConfig.RecordBranchIndex,
+		Scheme:             cfg.OpenSearchConfig.Scheme,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "opensearch disabled: %v\n", err)
+		return search.NoopIndexer{}
+	}
+	fmt.Fprintf(os.Stderr, "opensearch enabled domain=%s message_index=%s summary_index=%s branch_index=%s\n",
+		cfg.OpenSearchConfig.Domain,
+		cfg.OpenSearchConfig.RecordMessageIndex,
+		cfg.OpenSearchConfig.RecordSummaryIndex,
+		cfg.OpenSearchConfig.RecordBranchIndex,
+	)
+	return indexer
 }
 
 func mergeLLMConfig(cfg cliConfig, enable bool, disable bool, baseURL string, model string, apiKeyEnv string) (llm.OpenAICompatibleConfig, bool, error) {

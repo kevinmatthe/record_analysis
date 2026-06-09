@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/minio/minio-go/v7 v7.2.0
+	github.com/pelletier/go-toml/v2 v2.3.1
 	github.com/sashabaranov/go-openai v1.41.2
 	golang.org/x/crypto v0.52.0
 	gorm.io/driver/postgres v1.6.0
