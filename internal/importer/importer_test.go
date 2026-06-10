@@ -73,3 +73,53 @@ func TestNormalizeRowsFiltersNonTextPlaceholders(t *testing.T) {
 		t.Fatalf("content = %q", messages[0].Content)
 	}
 }
+
+func TestNormalizeRowsCleansWeChatXMLNoise(t *testing.T) {
+	rows := []rawMessage{
+		{
+			Time:     "2026-06-01 10:00:00",
+			Sender:   "我",
+			TypeName: "文本",
+			Content: `看啦
+> KevinMatt：<?xml version="1.0"?><msg><appmsg appid="wxcb8d"><title>加藤去贵阳vlog</title><des>UP主：加藤在中国</des><nickname>null</nickname><msgid>123</msgid><![CDATA[noise]]></appmsg></msg>`,
+		},
+	}
+
+	messages, err := normalizeRows(rows, "rel_test", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("messages = %+v", messages)
+	}
+	if messages[0].Content != "看啦" {
+		t.Fatalf("content = %q", messages[0].Content)
+	}
+	if messages[0].RawContent == messages[0].Content {
+		t.Fatal("expected raw content to preserve original payload")
+	}
+}
+
+func TestParseStatsCountsFilteredNoise(t *testing.T) {
+	rows := []rawMessage{
+		{Time: "2026-06-01 10:00:00", Sender: "我", TypeName: "文本", Content: "正常文本"},
+		{Time: "2026-06-01 10:01:00", Sender: "我", TypeName: "文本", Content: `<msg><appmsg appid="wx"><nickname>null</nickname><msgid>1</msgid></appmsg></msg>`},
+		{Time: "2026-06-01 10:02:00", Sender: "系统", TypeName: "文本", Content: "系统通知"},
+	}
+
+	messages, err := normalizeRows(rows, "rel_test", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats := ParseStats{RawRows: len(rows), NormalizedRows: len(messages), FilteredRows: len(rows) - len(messages)}
+	for _, message := range messages {
+		if message.Sender == "PERSON_A" || message.Sender == "PERSON_B" {
+			stats.ParticipantRows++
+		} else {
+			stats.SystemRows++
+		}
+	}
+	if stats.RawRows != 3 || stats.NormalizedRows != 2 || stats.FilteredRows != 1 || stats.ParticipantRows != 1 || stats.SystemRows != 1 {
+		t.Fatalf("stats = %+v", stats)
+	}
+}

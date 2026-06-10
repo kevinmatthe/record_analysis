@@ -203,27 +203,26 @@ func PreviewBranch(messages []model.Message, granularity string, start time.Time
 	if err != nil {
 		return BranchPreview{}, err
 	}
-	clusters := BuildTimelineClusters(buckets)
-	for _, cluster := range clusters {
-		if rangesOverlap(cluster.StartTime, cluster.EndTime, start, end) {
-			return BranchPreview{
-				Granularity:  granularity,
-				StartTime:    cluster.StartTime,
-				EndTime:      cluster.EndTime,
-				MessageCount: cluster.MessageCount,
-				BucketIDs:    append([]string(nil), cluster.BucketIDs...),
-				ClusterID:    cluster.ID,
-				TopicHint:    cluster.TopicHint,
-				Status:       cluster.Status,
-			}, nil
-		}
-	}
-	return BranchPreview{
+	preview := BranchPreview{
 		Granularity: granularity,
 		StartTime:   start,
 		EndTime:     end,
+		BucketIDs:   []string{},
 		Status:      "unseen",
-	}, nil
+	}
+	for _, bucket := range buckets {
+		if rangesOverlap(bucket.StartTime, bucket.EndTime, start, end) {
+			preview.MessageCount += bucket.MessageCount
+			preview.BucketIDs = append(preview.BucketIDs, bucket.ID)
+			if preview.TopicHint == "" {
+				preview.TopicHint = timelineBucketTopicHint(bucket)
+			} else if hint := timelineBucketTopicHint(bucket); hint != "" && !strings.Contains(preview.TopicHint, hint) {
+				preview.TopicHint = shortPreview(preview.TopicHint + " / " + hint)
+			}
+			preview.Status = mergeTimelineStatus(preview.Status, timelineBucketStatus(bucket))
+		}
+	}
+	return preview, nil
 }
 
 func normalizeGranularity(value string) string {

@@ -14,5 +14,6 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+    allowedHosts: ['www.kmhomelab.cn', 'localhost'],
   },
 });

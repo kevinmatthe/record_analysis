@@ -304,7 +304,7 @@ func (h *Handler) jobsHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	messages, err := importer.ParseChatFile(request.TempPath, request.RelationshipID, request.IncludeSystem)
+	messages, parseStats, err := importer.ParseChatFileWithStats(request.TempPath, request.RelationshipID, request.IncludeSystem)
 	if err != nil {
 		os.Remove(request.TempPath)
 		writeError(w, http.StatusBadRequest, err)
@@ -329,8 +329,11 @@ func (h *Handler) jobsHandler(w http.ResponseWriter, r *http.Request) {
 		PreviewTotal:    len(messages),
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
-		Events:          []JobEvent{{Time: time.Now(), Message: fmt.Sprintf("解析完成：%d 条可处理消息", len(messages))}},
-		messages:        messages,
+		Events: []JobEvent{
+			{Time: time.Now(), Message: fmt.Sprintf("解析完成：%d 条可处理消息", len(messages))},
+			{Time: time.Now(), Message: fmt.Sprintf("文本清洗：原始 %d 条，保留 %d 条，过滤微信结构/非文本噪音 %d 条", parseStats.RawRows, parseStats.NormalizedRows, parseStats.FilteredRows)},
+		},
+		messages: messages,
 	}
 	h.mu.Lock()
 	h.jobs[job.ID] = job
@@ -892,9 +895,18 @@ func (h *Handler) processSummaryMergeWorkItem(ctx context.Context, item Analysis
 		_ = h.store.FailWorkItem(ctx, item.ID, fmt.Errorf("summary merge requires llm merger"))
 		return true
 	}
-	summaryItems, err := h.store.CompletedTopicSummariesInRange(ctx, item.JobID, item.Granularity, item.StartTime, item.EndTime, 80)
+	expectedBuckets, err := h.store.JobTimeline(ctx, item.JobID, item.Granularity, &item.StartTime, &item.EndTime)
 	if err != nil {
 		_ = h.store.FailWorkItem(ctx, item.ID, err)
+		return true
+	}
+	summaryItems, err := h.store.CompletedTopicSummariesInRange(ctx, item.JobID, item.Granularity, item.StartTime, item.EndTime, len(expectedBuckets))
+	if err != nil {
+		_ = h.store.FailWorkItem(ctx, item.ID, err)
+		return true
+	}
+	if len(expectedBuckets) > 0 && len(summaryItems) < len(expectedBuckets) {
+		_ = h.store.FailWorkItem(ctx, item.ID, fmt.Errorf("summary coverage incomplete: %d/%d buckets completed; generate missing bucket summaries first", len(summaryItems), len(expectedBuckets)))
 		return true
 	}
 	summaries := make([]llm.TopicSummary, 0, len(summaryItems))
@@ -1448,6 +1460,15 @@ func (h *Handler) startBranchRun(branch *AnalysisBranch, messages []model.Messag
 	if analysisMode == "" {
 		analysisMode = "quick"
 	}
+	branchMessages := filterMessagesByWindow(messages, branch.StartTime, branch.EndTime)
+	if participantMessageCount(branchMessages) == 0 {
+		return fmt.Errorf("当前片段没有可分析的双方聊天文本，请重新选择包含 PERSON_A/PERSON_B 消息的时间段")
+	}
+	for i := range branchMessages {
+		if branchMessages[i].RelationshipID == "" {
+			branchMessages[i].RelationshipID = branch.RelationshipID
+		}
+	}
 	branch.Status = "running"
 	branch.Stage = "开始分析片段"
 	branch.Progress = 0.1
@@ -1458,7 +1479,6 @@ func (h *Handler) startBranchRun(branch *AnalysisBranch, messages []model.Messag
 			return err
 		}
 	}
-	branchMessages := filterMessagesByWindow(messages, branch.StartTime, branch.EndTime)
 	go h.runBranch(branch.ID, branchMessages, analysisMode, maxLLMMessages, persist)
 	return nil
 }
@@ -1590,6 +1610,16 @@ func filterMessagesByWindow(messages []model.Message, start time.Time, end time.
 		}
 	}
 	return filtered
+}
+
+func participantMessageCount(messages []model.Message) int {
+	count := 0
+	for _, message := range messages {
+		if message.Sender == "PERSON_A" || message.Sender == "PERSON_B" {
+			count++
+		}
+	}
+	return count
 }
 
 func branchRelationshipID(messages []model.Message) string {

@@ -11,6 +11,7 @@ import (
 	"github.com/kevinmatthe/record_analysis/internal/llm"
 	"github.com/kevinmatthe/record_analysis/internal/model"
 	"github.com/kevinmatthe/record_analysis/internal/service"
+	"github.com/kevinmatthe/record_analysis/internal/textclean"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -426,7 +427,11 @@ func (s *PostgresStore) JobPreview(ctx context.Context, jobID string, page int, 
 	}
 	messages := make([]model.Message, 0, len(rows))
 	for _, row := range rows {
-		messages = append(messages, model.Message{ID: row.MsgID, Sender: row.Sender, MsgTime: row.MsgTime, MsgType: row.MsgType, Content: row.Content})
+		content := textclean.CleanMessageText(row.Content)
+		if !textclean.IsNaturalMessageText(content) {
+			continue
+		}
+		messages = append(messages, model.Message{ID: row.MsgID, Sender: row.Sender, MsgTime: row.MsgTime, MsgType: row.MsgType, Content: content, RawContent: row.Content})
 	}
 	pageData := previewPage(messages, 1, pageSize)
 	pageData.Total = int(total)
@@ -563,16 +568,49 @@ func (s *PostgresStore) jobMessagesInRange(ctx context.Context, jobID string, st
 		return nil, err
 	}
 	messages := make([]model.Message, 0, len(rows))
+	senderMap := map[string]string{}
 	for _, row := range rows {
+		content := textclean.CleanMessageText(row.Content)
+		if !textclean.IsNaturalMessageText(content) {
+			continue
+		}
+		sender := normalizeStoredSender(row.Sender, senderMap)
 		messages = append(messages, model.Message{
-			ID:      row.MsgID,
-			Sender:  row.Sender,
-			MsgTime: row.MsgTime,
-			MsgType: row.MsgType,
-			Content: row.Content,
+			ID:             row.MsgID,
+			Sender:         sender,
+			OriginalSender: row.Sender,
+			MsgTime:        row.MsgTime,
+			MsgType:        row.MsgType,
+			Content:        content,
+			RawContent:     row.Content,
 		})
 	}
 	return messages, nil
+}
+
+func normalizeStoredSender(sender string, senderMap map[string]string) string {
+	sender = strings.TrimSpace(sender)
+	if sender == "" {
+		return "UNKNOWN"
+	}
+	if sender == "PERSON_A" || sender == "PERSON_B" || strings.HasPrefix(sender, "PERSON_") {
+		return sender
+	}
+	if sender == "我" {
+		return "PERSON_A"
+	}
+	if sender == "系统" {
+		return "系统"
+	}
+	if existing, ok := senderMap[sender]; ok {
+		return existing
+	}
+	if len(senderMap) == 0 {
+		senderMap[sender] = "PERSON_B"
+	} else {
+		senderMap[sender] = fmt.Sprintf("PERSON_%d", len(senderMap)+2)
+	}
+	return senderMap[sender]
 }
 
 func (s *PostgresStore) CreateBranch(ctx context.Context, branch *AnalysisBranch) error {

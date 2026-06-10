@@ -75,6 +75,21 @@ func TestBuildActionBatchTasksScopesMessagesToSegment(t *testing.T) {
 	}
 }
 
+func TestLLMMessagesSkipWeChatStructuralNoise(t *testing.T) {
+	messages := []model.Message{
+		taskMsg(1, "PERSON_A", 0, `<msg><appmsg appid="wx"><nickname>null</nickname><msgid>1</msgid></appmsg></msg>`),
+		taskMsg(2, "PERSON_B", 1, "晚上吃什么"),
+	}
+
+	result := llmMessages(messages)
+	if len(result) != 1 {
+		t.Fatalf("messages = %+v", result)
+	}
+	if result[0].ID != "MSG_000002" || result[0].Content != "晚上吃什么" {
+		t.Fatalf("message = %+v", result[0])
+	}
+}
+
 func TestBuildEventTaskScopesMessagesAndActionsToSegment(t *testing.T) {
 	messages := []model.Message{
 		taskMsg(1, "PERSON_A", 0, "第一句"),

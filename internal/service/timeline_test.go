@@ -86,7 +86,7 @@ func TestBuildTimelineClustersDoesNotUseAccumulatedClusterDurationAsGap(t *testi
 	}
 }
 
-func TestPreviewBranchExpandsToContainingCluster(t *testing.T) {
+func TestPreviewBranchUsesRequestedRange(t *testing.T) {
 	messages := []model.Message{
 		{ID: "MSG_000001", Sender: "PERSON_A", OriginalSender: "我", MsgTime: time.Date(2026, 6, 1, 10, 5, 0, 0, time.Local), Content: "今天中午吃什么"},
 		{ID: "MSG_000002", Sender: "PERSON_B", OriginalSender: "小青", MsgTime: time.Date(2026, 6, 1, 10, 20, 0, 0, time.Local), Content: "去吃面吧"},
@@ -99,10 +99,29 @@ func TestPreviewBranchExpandsToContainingCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.MessageCount != 4 || len(preview.BucketIDs) != 2 {
+	if preview.MessageCount != 2 || len(preview.BucketIDs) != 1 {
 		t.Fatalf("preview = %+v", preview)
 	}
-	if preview.StartTime.Hour() != 10 || preview.EndTime.Hour() != 12 {
+	if preview.StartTime.Hour() != 11 || preview.EndTime.Hour() != 12 {
 		t.Fatalf("preview window = %s - %s", preview.StartTime, preview.EndTime)
+	}
+}
+
+func TestPreviewBranchCoversEntireRequestedRange(t *testing.T) {
+	messages := []model.Message{
+		{ID: "MSG_000001", Sender: "PERSON_A", MsgTime: time.Date(2026, 6, 1, 10, 5, 0, 0, time.Local), Content: "第一天"},
+		{ID: "MSG_000002", Sender: "PERSON_A", MsgTime: time.Date(2026, 6, 2, 10, 5, 0, 0, time.Local), Content: "第二天"},
+		{ID: "MSG_000003", Sender: "PERSON_A", MsgTime: time.Date(2026, 6, 3, 10, 5, 0, 0, time.Local), Content: "第三天"},
+	}
+
+	preview, err := PreviewBranch(messages, "day", time.Date(2026, 6, 1, 0, 0, 0, 0, time.Local), time.Date(2026, 6, 4, 0, 0, 0, 0, time.Local))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.MessageCount != 3 || len(preview.BucketIDs) != 3 {
+		t.Fatalf("preview = %+v", preview)
+	}
+	if !preview.StartTime.Equal(time.Date(2026, 6, 1, 0, 0, 0, 0, time.Local)) || !preview.EndTime.Equal(time.Date(2026, 6, 4, 0, 0, 0, 0, time.Local)) {
+		t.Fatalf("preview range = %s - %s", preview.StartTime, preview.EndTime)
 	}
 }

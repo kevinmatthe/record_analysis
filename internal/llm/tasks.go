@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/kevinmatthe/record_analysis/internal/model"
+	"github.com/kevinmatthe/record_analysis/internal/textclean"
 )
 
 type MessageForLLM struct {
@@ -181,6 +182,9 @@ func BuildTopicSummaryMergeTask(input TopicSummaryMergeInput) TopicSummaryMergeT
 func llmMessages(messages []model.Message) []MessageForLLM {
 	result := make([]MessageForLLM, 0, len(messages))
 	for _, message := range messages {
+		if !textclean.IsNaturalMessageText(message.Content) {
+			continue
+		}
 		result = append(result, llmMessage(message))
 	}
 	return result
@@ -192,7 +196,7 @@ func llmMessage(message model.Message) MessageForLLM {
 		Sender:  message.Sender,
 		Time:    formatTime(message.MsgTime),
 		Type:    message.MsgType,
-		Content: message.Content,
+		Content: textclean.CleanMessageText(message.Content),
 	}
 }
 

@@ -1,4 +1,4 @@
-import { FormEvent, Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   ArrowRight,
@@ -15,9 +15,7 @@ import {
   Search,
   UploadCloud,
   ZoomIn,
-  ZoomOut,
 } from 'lucide-react';
-import * as echarts from 'echarts';
 import {
   AnalysisJob,
   AnalysisBranch,
@@ -54,8 +52,17 @@ import {
   searchJobMessages,
   seedWorkItems,
 } from './api';
-
-const MarkdownRenderer = lazy(() => import('react-markdown'));
+import {
+  BranchInspector,
+  EChartsTimelineRenderer,
+  InsightInspector,
+  TimelineActionDock,
+  TimelineFloatPanels,
+  TimelineHeaderControls,
+  TimelineSummaryRail,
+  TimelineUtilityDrawer,
+  TimelineUtilityPanel,
+} from './timeline';
 
 type View = 'analysis' | 'history' | 'job' | 'report' | 'branch' | 'account';
 type RouteState = { view: View; reportID?: string; jobID?: string; branchID?: string };
@@ -648,8 +655,14 @@ function JobDetailPage({
   const [messageSearchQuery, setMessageSearchQuery] = useState('');
   const [messageSearchPage, setMessageSearchPage] = useState(1);
   const [messageSearchResults, setMessageSearchResults] = useState<MessageSearchPage | null>(null);
+  const [rangeMessages, setRangeMessages] = useState<MessageSearchPage | null>(null);
+  const [rangeMessagesPage, setRangeMessagesPage] = useState(1);
+  const [loadingRangeMessages, setLoadingRangeMessages] = useState(false);
   const [searchingMessages, setSearchingMessages] = useState(false);
   const [loadingTimeline, setLoadingTimeline] = useState(false);
+  const [openTimelinePanel, setOpenTimelinePanel] = useState<'scope' | 'bucket' | 'evidence' | null>('scope');
+  const [openUtilityPanel, setOpenUtilityPanel] = useState<TimelineUtilityPanel | null>(null);
+  const [selectedInsightID, setSelectedInsightID] = useState<string | null>(null);
 
   useEffect(() => {
     setJob(initialJob);
@@ -693,6 +706,15 @@ function JobDetailPage({
   useEffect(() => {
     setMessageSearchPage(1);
   }, [messageSearchQuery, branchPreview?.start_time, branchPreview?.end_time]);
+
+  useEffect(() => {
+    setRangeMessagesPage(1);
+  }, [branchPreview?.start_time, branchPreview?.end_time, selectedRange?.start, selectedRange?.end, selectedBucket?.id]);
+
+  useEffect(() => {
+    if (openTimelinePanel !== 'evidence') return;
+    void loadRangeMessages(rangeMessagesPage);
+  }, [openTimelinePanel, rangeMessagesPage, branchPreview?.start_time, branchPreview?.end_time, selectedRange?.start, selectedRange?.end, selectedBucket?.id]);
 
   useEffect(() => {
     if (!job) {
@@ -800,6 +822,7 @@ function JobDetailPage({
   const zoomIndex = zoomSteps.indexOf(activeGranularity);
   const canUseFineGranularity = timelineWindow !== null;
   const visibleGranularities = ['auto', 'year', 'month', 'week', 'day', 'hour', '15m', '5m'] as const;
+  const timelineStats = bucketAnalysisStats(timeline);
 
   async function saveBranch() {
     if (!job || !branchPreview) return;
@@ -825,6 +848,20 @@ function JobDetailPage({
       setBranches((current) => current.map((item) => (item.id === next.id ? next : item)));
       const refreshed = await listJobBranches(job.id);
       setBranches(refreshed.items ?? []);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '运行分析失败';
+      setBranches((current) =>
+        current.map((item) =>
+          item.id === branch.id
+            ? {
+                ...item,
+                status: 'failed',
+                stage: '运行分析失败',
+                error: message,
+              }
+            : item,
+        ),
+      );
     } finally {
       setRunningBranchID(null);
     }
@@ -871,6 +908,9 @@ function JobDetailPage({
   }
 
   function currentAnalysisRange(): TimelineRange | null {
+    if (selectedRange) {
+      return selectedRange;
+    }
     if (branchPreview) {
       return { start: branchPreview.start_time, end: branchPreview.end_time };
     }
@@ -889,13 +929,15 @@ function JobDetailPage({
   }
 
   async function createCurrentMergeSummary() {
-    if (!job || !branchPreview) return;
+    if (!job) return;
+    const range = currentAnalysisRange();
+    if (!range) return;
     setCreatingMergeSummary(true);
     try {
       const item = await createSummaryMergeWorkItem(job.id, {
         granularity: resolvedGranularity,
-        start_time: branchPreview.start_time,
-        end_time: branchPreview.end_time,
+        start_time: range.start,
+        end_time: range.end,
       });
       setMergeItems((current) => [item, ...current.filter((candidate) => candidate.id !== item.id)]);
     } finally {
@@ -912,6 +954,23 @@ function JobDetailPage({
       setMessageSearchPage(data.page);
     } finally {
       setSearchingMessages(false);
+    }
+  }
+
+  async function loadRangeMessages(page = rangeMessagesPage) {
+    if (!job) return;
+    const range = currentAnalysisRange();
+    if (!range) {
+      setRangeMessages(null);
+      return;
+    }
+    setLoadingRangeMessages(true);
+    try {
+      const data = await searchJobMessages(job.id, '', page, 8, range);
+      setRangeMessages(data);
+      setRangeMessagesPage(data.page);
+    } finally {
+      setLoadingRangeMessages(false);
     }
   }
 
@@ -936,27 +995,235 @@ function JobDetailPage({
     setGranularity('auto');
   }
 
-  const selectedWorkItems = selectedCluster
-    ? workItems.filter((item) => selectedCluster.bucket_ids.includes(item.scope_id))
-    : selectedBucket
-      ? workItems.filter((item) => item.scope_id === selectedBucket.id)
-      : [];
-  const selectedSummaryItems = branchPreview
+  function drillIntoCurrentRange() {
+    const range = currentAnalysisRange();
+    if (!range) return;
+    setTimelineWindow(range);
+    setSelectedRange(range);
+    setGranularity('hour');
+  }
+
+  const activeRange = currentAnalysisRange();
+  const selectedWorkItems = selectedRange
+    ? workItems.filter((item) => rangeContains(selectedRange.start, selectedRange.end, item.start_time, item.end_time))
+    : branchPreview
+    ? workItems.filter((item) => branchPreview.bucket_ids.includes(item.scope_id) || rangeContains(branchPreview.start_time, branchPreview.end_time, item.start_time, item.end_time))
+    : selectedCluster
+      ? workItems.filter((item) => selectedCluster.bucket_ids.includes(item.scope_id))
+      : selectedBucket
+        ? workItems.filter((item) => item.scope_id === selectedBucket.id)
+        : [];
+  const selectedSummaryItems = selectedRange
+    ? summaryItems.filter((item) => rangeContains(selectedRange.start, selectedRange.end, item.start_time, item.end_time))
+    : branchPreview
     ? summaryItems.filter((item) => branchPreview.bucket_ids.includes(item.scope_id))
     : selectedCluster
       ? summaryItems.filter((item) => selectedCluster.bucket_ids.includes(item.scope_id))
       : selectedBucket
         ? summaryItems.filter((item) => item.scope_id === selectedBucket.id)
         : [];
-  const selectedMergeItems = branchPreview
+  const selectedMergeItems = activeRange
     ? mergeItems.filter(
         (item) =>
-          item.start_time === branchPreview.start_time &&
-          item.end_time === branchPreview.end_time &&
+          item.start_time === activeRange.start &&
+          item.end_time === activeRange.end &&
           item.granularity === resolvedGranularity,
       )
     : [];
-  const selectedWordCloudTitle = selectedCluster ? '当前簇词云' : '当前桶词云';
+  const summaryCoverage = summaryCoverageStats(branchPreview?.bucket_ids.length ?? 0, selectedSummaryItems);
+  const selectedWordCloudTitle = selectedRange ? '当前框选词云' : selectedCluster ? '当前簇词云' : '当前桶词云';
+  const activeScopeKind = selectedRange ? '框选范围' : selectedCluster ? '连续对话簇' : selectedBucket ? '单个时间桶' : '未选择';
+  const activeScopeWindow = activeRange ? `${formatDate(activeRange.start)} - ${formatDate(activeRange.end)}` : '请选择时间轴上的点或范围';
+  const selectedBranch = visibleBranches.find((branch) => branch.id === expandedBranchID) ?? null;
+  const insightItems = [...summaryItems, ...mergeItems, ...workItems];
+  const selectedInsight = insightItems.find((item) => item.id === selectedInsightID) ?? null;
+  const evidencePage = rangeMessages ?? (bucketMessages ? { ...bucketMessages, source: 'bucket' } : null);
+  const evidenceRangeLabel = activeRange ? `${formatDate(activeRange.start)} - ${formatDate(activeRange.end)}` : selectedBucket ? formatBucketWindow(selectedBucket) : '未选中范围';
+  const utilityTitle = openUtilityPanel === 'tasks' ? '当前片段任务' : openUtilityPanel === 'messages' ? '桶内消息' : openUtilityPanel === 'search' ? '消息搜索' : openUtilityPanel === 'branches' ? '已保存 Branch' : activeScopeKind;
+  const utilitySubtitle =
+    openUtilityPanel === 'messages'
+      ? selectedBucket
+        ? formatBucketWindow(selectedBucket)
+        : '请选择一个时间桶'
+      : openUtilityPanel === 'search'
+        ? messageSearchResults
+          ? `${messageSearchResults.total} 条 · ${messageSearchResults.source}`
+          : '按当前片段或时间桶搜索'
+        : openUtilityPanel === 'branches'
+          ? `${visibleBranches.length} 个已保存片段`
+        : activeScopeWindow;
+  const utilityPanel = (
+    <>
+      {openUtilityPanel === 'scope' && (
+        <div className="utilityStack">
+          <div className="floatMetricGrid">
+            <div>
+              <span>消息</span>
+              <strong>{branchPreview?.message_count ?? selectedBucket?.message_count ?? 0}</strong>
+            </div>
+            <div>
+              <span>Bucket</span>
+              <strong>{branchPreview?.bucket_ids.length ?? (selectedBucket ? 1 : 0)}</strong>
+            </div>
+            <div>
+              <span>摘要覆盖</span>
+              <strong>{summaryCoverage.completed}/{summaryCoverage.expected}</strong>
+            </div>
+            <div>
+              <span>词云任务</span>
+              <strong>{selectedWorkItems.length}</strong>
+            </div>
+          </div>
+          <div className="scopeNotice">
+            <strong>操作对象</strong>
+            <span>{selectedRange ? '当前框选的完整时间范围' : selectedCluster ? '当前连续对话簇' : selectedBucket ? '当前选中时间桶' : '未选择'}</span>
+          </div>
+          <label>
+            Branch 标题
+            <input value={branchTitle} onChange={(event) => setBranchTitle(event.target.value)} placeholder="例如：午饭安排" />
+          </label>
+          <div className="bucketPreviewText">{branchPreview?.topic_hint || selectedBucket?.summary_title || selectedBucket?.preview || '当前候选区间还没有主题提示。'}</div>
+          <button className="primary full" disabled={creatingBranch || !branchPreview} onClick={saveBranch}>
+            {creatingBranch ? <Loader2 className="spin" size={16} /> : <BookmarkPlus size={16} />} 保存为 Branch
+          </button>
+        </div>
+      )}
+      {openUtilityPanel === 'tasks' && (
+        <div className="utilityStack">
+          <WorkItemOverview
+            title="当前片段任务"
+            items={[...selectedSummaryItems, ...selectedMergeItems]}
+            expectedSummaries={branchPreview?.bucket_ids.length ?? 0}
+            onPrioritize={(item) => void prioritizeSelectedWorkItem(item)}
+          />
+          <button className="secondary full" disabled={seedingSummaries || timeline.length === 0} onClick={() => void seedTopicSummaries()}>
+            {seedingSummaries ? <Loader2 className="spin" size={16} /> : <FileText size={16} />} {summaryCoverage.missing > 0 ? `生成缺失摘要 (${summaryCoverage.missing})` : '重新检查片段摘要'}
+          </button>
+          <button
+            className="secondary full"
+            disabled={creatingMergeSummary || !summaryCoverage.ready}
+            onClick={() => void createCurrentMergeSummary()}
+            title={!summaryCoverage.ready ? '需要当前范围内所有 bucket 摘要完成后才能聚合' : undefined}
+          >
+            {creatingMergeSummary ? <Loader2 className="spin" size={16} /> : <FileText size={16} />} 聚合完整周期摘要
+          </button>
+          <MergeSummaryPanel items={selectedMergeItems} onPrioritize={(item) => void prioritizeSelectedWorkItem(item)} />
+          <TopicSummaryPanel items={selectedSummaryItems} onPrioritize={(item) => void prioritizeSelectedWorkItem(item)} />
+          <WordCloudPanel title={selectedWordCloudTitle} items={selectedWorkItems} onPrioritize={(item) => void prioritizeSelectedWorkItem(item)} />
+        </div>
+      )}
+      {openUtilityPanel === 'messages' && (
+        <div className="utilityStack">
+          <div className="previewHeader">
+            <h2>桶内消息</h2>
+            <div className="previewControls">
+              <button className="secondary" disabled={bucketPage <= 1} onClick={() => setBucketPage(bucketPage - 1)}>
+                上一页
+              </button>
+              <span>
+                {bucketMessages?.page ?? bucketPage} / {bucketMessages?.total_pages ?? 1}
+              </span>
+              <button className="secondary" disabled={!bucketMessages || bucketPage >= bucketMessages.total_pages} onClick={() => setBucketPage(bucketPage + 1)}>
+                下一页
+              </button>
+            </div>
+          </div>
+          <div className="previewList utilityPreviewList">
+            {(bucketMessages?.items ?? []).map((message) => (
+              <div className="previewRow" key={message.id}>
+                <span>{message.time}</span>
+                <strong>{message.sender}</strong>
+                <p>{message.content}</p>
+              </div>
+            ))}
+            {selectedBucket && bucketMessages && bucketMessages.items.length === 0 && <div className="empty">这个时间桶没有消息</div>}
+            {!selectedBucket && <div className="empty">请先在时间轴上选择一个时间桶</div>}
+          </div>
+        </div>
+      )}
+      {openUtilityPanel === 'search' && (
+        <div className="utilityStack">
+          <div className="searchInline">
+            <input
+              value={messageSearchQuery}
+              onChange={(event) => setMessageSearchQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') void runMessageSearch(1);
+              }}
+              placeholder="搜索消息内容或发送者"
+            />
+            <button className="secondary" disabled={searchingMessages} onClick={() => void runMessageSearch(1)}>
+              {searchingMessages ? <Loader2 className="spin" size={16} /> : <Search size={16} />} 搜索
+            </button>
+          </div>
+          <div className="previewList utilityPreviewList">
+            {(messageSearchResults?.items ?? []).map((message) => (
+              <div className="previewRow" key={message.id}>
+                <span>{message.time}</span>
+                <strong>{message.sender}</strong>
+                <p>{message.content}</p>
+              </div>
+            ))}
+            {messageSearchResults && messageSearchResults.items.length === 0 && <div className="empty">没有搜索结果</div>}
+          </div>
+          {messageSearchResults && messageSearchResults.total_pages > 1 && (
+            <div className="previewControls">
+              <button className="secondary" disabled={messageSearchPage <= 1 || searchingMessages} onClick={() => void runMessageSearch(messageSearchPage - 1)}>
+                上一页
+              </button>
+              <span>
+                {messageSearchResults.page} / {messageSearchResults.total_pages}
+              </span>
+              <button className="secondary" disabled={messageSearchPage >= messageSearchResults.total_pages || searchingMessages} onClick={() => void runMessageSearch(messageSearchPage + 1)}>
+                下一页
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      {openUtilityPanel === 'branches' && (
+        <div className="recordList utilityBranchList">
+          {visibleBranches.map((branch) => {
+            const expanded = expandedBranchID === branch.id;
+            return (
+              <div className="recordRow staticRow" key={branch.id}>
+                <div>
+                  <strong>{branch.title}</strong>
+                  <span>{branch.id}</span>
+                </div>
+                <div className="recordMeta">
+                  <span>
+                    <Clock3 size={14} /> {formatDate(branch.start_time)} - {formatDate(branch.end_time)}
+                  </span>
+                  <span>
+                    <Database size={14} /> {branch.message_count} msgs
+                  </span>
+                  <span>
+                    <Activity size={14} /> {branch.status}
+                  </span>
+                  <span>
+                    <Clock3 size={14} /> {branch.total_tokens} tokens
+                  </span>
+                </div>
+                <p>{branchSummary(branch)}</p>
+                <div className="branchActions">
+                  <button className="secondary" disabled={runningBranchID === branch.id || branch.status === 'running' || branch.message_count <= 0} onClick={() => void runBranch(branch)}>
+                    {runningBranchID === branch.id ? <Loader2 className="spin" size={16} /> : <Activity size={16} />} 运行分析
+                  </button>
+                  <button className="secondary" onClick={() => setExpandedBranchID(expanded ? null : branch.id)}>
+                    {expanded ? '关闭面板' : '打开面板'}
+                  </button>
+                  <span className="branchStage">{branch.message_count <= 0 ? '当前片段没有可分析消息' : branch.stage || '等待分析'}</span>
+                </div>
+                {branch.error && <div className="error">{branch.error}</div>}
+              </div>
+            );
+          })}
+          {visibleBranches.length === 0 && <div className="empty">还没有保存的 Branch</div>}
+        </div>
+      )}
+    </>
+  );
 
   return (
     <section className="page">
@@ -1014,76 +1281,171 @@ function JobDetailPage({
 
         <div className="jobMain">
           <div className="panel timelinePanel">
-            <div className="timelineHeader">
-              <div>
-                <h2>时间轴</h2>
-                <p>
-                  {timelineWindow ? `局部 ${formatDate(timelineWindow.start)} - ${formatDate(timelineWindow.end)}` : '全局概览'}
-                  {' · '}
-                  当前按 {granularity === 'auto' ? `自动粒度 (${granularityLabel(resolvedGranularity)})` : granularityLabel(resolvedGranularity)} 聚合消息桶。
-                </p>
+            <InteractionFlow />
+            <TimelineHeaderControls
+              timelineWindowLabel={timelineWindow ? `局部 ${formatDate(timelineWindow.start)} - ${formatDate(timelineWindow.end)}` : '全局概览'}
+              granularity={granularity}
+              resolvedGranularity={resolvedGranularity}
+              visibleGranularities={visibleGranularities}
+              canUseFineGranularity={canUseFineGranularity}
+              zoomIndex={zoomIndex}
+              zoomStepsLength={zoomSteps.length}
+              hasTimelineWindow={Boolean(timelineWindow)}
+              seedingWorkItems={seedingWorkItems}
+              timelineLength={timeline.length}
+              onGranularityChange={setGranularity}
+              onZoom={zoomTimeline}
+              onResetTimelineWindow={resetTimelineWindow}
+              onSeedWordClouds={() => void seedWordClouds()}
+            />
+            <div className="timelineMeta">
+              <div className="timelineMetaPrimary">
+                <strong>{timeline.length}</strong>
+                <span>时间桶</span>
+                <strong>{timelineStats.completed}</strong>
+                <span>已完成</span>
+                <strong>{timelineStats.running + timelineStats.queued}</strong>
+                <span>处理中/排队</span>
+                <strong>{timelineStats.failed}</strong>
+                <span>失败</span>
               </div>
-              <div className="timelineControls">
-                <div className="segmented">
-                {visibleGranularities.map((value) => {
-                  const disabled = value !== 'auto' && isFineGranularity(value) && !canUseFineGranularity;
-                  return (
-                    <button
-                      key={value}
-                      className={granularity === value ? 'active' : ''}
-                      disabled={disabled}
-                      onClick={() => setGranularity(value)}
-                      title={disabled ? '先框选一段时间，再进入小时或分钟级' : undefined}
-                    >
-                      {granularityLabel(value)}
-                    </button>
-                  );
-                })}
-                </div>
-                <div className="zoomControls">
-                  <button className="secondary iconOnly" onClick={() => zoomTimeline('out')} disabled={zoomIndex <= 0 && granularity !== 'auto'} title="缩小时间尺度">
-                    <ZoomOut size={16} />
-                  </button>
-                  <button className="secondary iconOnly" onClick={() => zoomTimeline('in')} disabled={zoomIndex >= zoomSteps.length - 1 && granularity !== 'auto'} title="放大时间尺度">
-                    <ZoomIn size={16} />
-                  </button>
-                  {timelineWindow && (
-                    <button className="secondary" onClick={resetTimelineWindow}>
-                      返回全局
-                    </button>
-                  )}
-                  <button className="secondary" disabled={seedingWorkItems || timeline.length === 0} onClick={() => void seedWordClouds()}>
-                    {seedingWorkItems ? <Loader2 className="spin" size={16} /> : <Search size={16} />} 词云预聚合
-                  </button>
-                </div>
+              <div className="timelineLegend">
+                {(['completed', 'running', 'queued', 'failed', 'unseen'] as const).map((status) => (
+                  <span key={status}>
+                    <i style={{ background: bucketStatusColor(status, false) }} />
+                    {statusText(status)}
+                  </span>
+                ))}
               </div>
+              {selectedRange && (
+                <div className="timelineSelection">
+                  已选区间 {formatDate(selectedRange.start)} - {formatDate(selectedRange.end)}
+                </div>
+              )}
             </div>
             {loadingTimeline ? (
               <div className="timelineChartLoading">
                 <Loader2 className="spin" size={16} /> 正在加载时间桶
               </div>
             ) : (
-              <TimelineChart
-                buckets={timeline}
-                granularity={resolvedGranularity}
-                selectedBucketID={selectedBucket?.id ?? ''}
-                selectedRange={selectedRange}
-                bucketPeak={bucketPeak}
-                onSelectBucket={(bucket) => {
-                  setSelectedBucket(bucket);
-                  setSelectedRange(null);
-                  setSelectedCluster(null);
-                }}
-                onSelectRange={(start, end, firstBucket) => {
-                  setSelectedRange({ start, end });
-                  setSelectedBucket(firstBucket);
-                  setSelectedCluster(null);
-                  if (!timelineWindow && !isFineGranularity(resolvedGranularity)) {
-                    setTimelineWindow({ start, end });
-                    setGranularity('hour');
-                  }
-                }}
-              />
+              <div className="timelineStage">
+                <TimelineActionDock
+                  hasActiveRange={Boolean(activeRange)}
+                  seedingSummaries={seedingSummaries}
+                  creatingMergeSummary={creatingMergeSummary}
+                  summaryReady={summaryCoverage.ready}
+                  creatingBranch={creatingBranch}
+                  hasBranchPreview={Boolean(branchPreview)}
+                  onDrill={drillIntoCurrentRange}
+                  onSeedSummaries={() => void seedTopicSummaries()}
+                  onCreateMergeSummary={() => void createCurrentMergeSummary()}
+                  onSaveBranch={saveBranch}
+                />
+                <TimelineFloatPanels
+                  openPanel={openTimelinePanel}
+                  onTogglePanel={(panel) => setOpenTimelinePanel((current) => (current === panel ? null : panel))}
+                  onClose={() => setOpenTimelinePanel(null)}
+                  activeScopeKind={activeScopeKind}
+                  activeScopeWindow={activeScopeWindow}
+                  scopeHint={branchPreview?.topic_hint || selectedBucket?.summary_title || selectedBucket?.preview || '当前选择还没有稳定摘要。'}
+                  messageCount={branchPreview?.message_count ?? selectedBucket?.message_count ?? 0}
+                  bucketCount={branchPreview?.bucket_ids.length ?? (selectedBucket ? 1 : 0)}
+                  summaryCoverageText={`${summaryCoverage.completed}/${summaryCoverage.expected}`}
+                  wordCloudTaskCount={selectedWorkItems.length}
+                  selectedBucket={selectedBucket}
+                  evidencePage={evidencePage}
+                  evidenceRangeLabel={evidenceRangeLabel}
+                  loadingEvidence={loadingRangeMessages}
+                  evidencePageNumber={rangeMessagesPage}
+                  onEvidencePageChange={setRangeMessagesPage}
+                />
+                <TimelineUtilityDrawer
+                  activePanel={openUtilityPanel}
+                  title={utilityTitle}
+                  subtitle={utilitySubtitle}
+                  onPanelChange={(panel) => setOpenUtilityPanel((current) => (current === panel ? null : panel))}
+                  onClose={() => setOpenUtilityPanel(null)}
+                >
+                  {utilityPanel}
+                </TimelineUtilityDrawer>
+                <EChartsTimelineRenderer
+                  buckets={timeline}
+                  granularity={resolvedGranularity}
+                  selectedBucketID={selectedBucket?.id ?? ''}
+                  selectedBranchID={expandedBranchID ?? ''}
+                  selectedInsightID={selectedInsightID ?? ''}
+                  selectedRange={selectedRange}
+                  bucketPeak={bucketPeak}
+                  wordCloudItems={workItems}
+                  summaryItems={[...summaryItems, ...mergeItems]}
+                  branches={visibleBranches}
+                  onSelectBucket={(bucket) => {
+                    setSelectedBucket(bucket);
+                    setSelectedRange(null);
+                    setSelectedCluster(null);
+                  }}
+                  onSelectRange={(start, end, firstBucket) => {
+                    setSelectedRange({ start, end });
+                    setSelectedBucket(firstBucket);
+                    setSelectedCluster(null);
+                  }}
+                  onSelectBranch={(branch) => {
+                    setSelectedRange({ start: branch.start_time, end: branch.end_time });
+                    setSelectedCluster(null);
+                    setExpandedBranchID(branch.id);
+                    setSelectedInsightID(null);
+                    const bucket = timeline.find((candidate) => rangesOverlap(candidate.start_time, candidate.end_time, branch.start_time, branch.end_time));
+                    if (bucket) {
+                      setSelectedBucket(bucket);
+                    }
+                  }}
+                  onSelectInsight={(item) => {
+                    setSelectedInsightID(item.id);
+                    setExpandedBranchID(null);
+                    setSelectedRange({ start: item.start_time, end: item.end_time });
+                    setSelectedCluster(null);
+                    const bucket = timeline.find((candidate) => candidate.id === item.scope_id) ?? timeline.find((candidate) => rangesOverlap(candidate.start_time, candidate.end_time, item.start_time, item.end_time));
+                    if (bucket) {
+                      setSelectedBucket(bucket);
+                    }
+                  }}
+                />
+                {(selectedBranch || selectedInsight) && (
+                  <div className="timelineStageInspector">
+                    {selectedBranch ? (
+                      <BranchInspector
+                        branch={selectedBranch}
+                        runningBranchID={runningBranchID}
+                        onRun={(branch) => void runBranch(branch)}
+                        onClose={() => setExpandedBranchID(null)}
+                      />
+                    ) : (
+                      <InsightInspector
+                        item={selectedInsight}
+                        onPrioritize={(item) => void prioritizeSelectedWorkItem(item)}
+                        onClose={() => setSelectedInsightID(null)}
+                      />
+                    )}
+                  </div>
+                )}
+                <div className="timelineSummaryOverlay">
+                  <TimelineSummaryRail
+                    summaries={summaryItems}
+                    merges={mergeItems}
+                    selectedRange={activeRange}
+                    onSelect={(item) => {
+                      setSelectedRange({ start: item.start_time, end: item.end_time });
+                      setSelectedCluster(null);
+                      setSelectedInsightID(item.id);
+                      setExpandedBranchID(null);
+                      const bucket = timeline.find((candidate) => candidate.id === item.scope_id) ?? timeline.find((candidate) => rangesOverlap(candidate.start_time, candidate.end_time, item.start_time, item.end_time));
+                      if (bucket) {
+                        setSelectedBucket(bucket);
+                      }
+                    }}
+                  />
+                </div>
+              </div>
             )}
             {clusters.length > 0 && (
               <div className={`clusterStrip ${clusterDensity}`}>
@@ -1109,246 +1471,6 @@ function JobDetailPage({
                 ))}
               </div>
             )}
-          </div>
-
-          <div className="jobDetailGrid">
-            <div className="panel bucketPanel">
-              <div className="bucketHeader">
-                <div>
-                  <h2>选中时间桶</h2>
-                  <p>{selectedBucket ? formatBucketWindow(selectedBucket) : '请选择一个时间桶'}</p>
-                </div>
-              </div>
-              {selectedBucket ? (
-                <>
-                  <div className="bucketFacts">
-                    <div className="metric">
-                      <span>消息数</span>
-                      <strong>{selectedBucket.message_count}</strong>
-                    </div>
-                    <div className="metric">
-                      <span>参与人</span>
-                      <strong>{selectedBucket.participant_count}</strong>
-                    </div>
-                    <div className="metric">
-                      <span>摘要状态</span>
-                      <strong>{selectedBucket.summary_status || 'unseen'}</strong>
-                    </div>
-                    <div className="metric">
-                      <span>Token</span>
-                      <strong>{selectedBucket.total_tokens || 0}</strong>
-                    </div>
-                  </div>
-                  <BucketStatusStrip bucket={selectedBucket} />
-                  <div className="participantChips">
-                    {Object.entries(selectedBucket.participant_messages).map(([name, count]) => (
-                      <div className="participantChip" key={name}>
-                        <span>{name}</span>
-                        <strong>{count}</strong>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="bucketPreviewText">{selectedBucket.summary_title || selectedBucket.preview || '该时间桶没有可展示摘要。'}</div>
-                  {selectedBucket.summary_topics && selectedBucket.summary_topics.length > 0 && (
-                    <div className="topicChips">
-                      {selectedBucket.summary_topics.slice(0, 5).map((topic) => (
-                        <span key={topic}>{topic}</span>
-                      ))}
-                    </div>
-                  )}
-                  <WordCloudPanel title={selectedWordCloudTitle} items={selectedWorkItems} onPrioritize={(item) => void prioritizeSelectedWorkItem(item)} />
-                </>
-              ) : (
-                <div className="empty">没有选中时间桶</div>
-              )}
-            </div>
-
-            <div className="detailStack">
-              <div className="panel clusterPanel">
-                <div className="bucketHeader">
-                  <div>
-                    <h2>连续片段预览</h2>
-                    <p>{branchPreview ? formatDate(branchPreview.start_time) + ' - ' + formatDate(branchPreview.end_time) : '请选择一个连续片段'}</p>
-                  </div>
-                </div>
-                {branchPreview ? (
-                  <>
-                    <div className="bucketFacts">
-                      <div className="metric">
-                        <span>扩展后消息数</span>
-                        <strong>{branchPreview.message_count}</strong>
-                      </div>
-                      <div className="metric">
-                        <span>覆盖时间桶</span>
-                        <strong>{branchPreview.bucket_ids.length}</strong>
-                      </div>
-                    </div>
-                    <label>
-                      片段标题
-                      <input value={branchTitle} onChange={(event) => setBranchTitle(event.target.value)} placeholder="例如：午饭安排" />
-                    </label>
-                    <div className="bucketPreviewText">{branchPreview.topic_hint || '当前候选区间还没有主题提示。'}</div>
-                    <button className="secondary full" disabled={seedingSummaries || timeline.length === 0} onClick={() => void seedTopicSummaries()}>
-                      {seedingSummaries ? <Loader2 className="spin" size={16} /> : <FileText size={16} />} 生成片段摘要
-                    </button>
-                    <button
-                      className="secondary full"
-                      disabled={creatingMergeSummary || selectedSummaryItems.every((item) => item.status !== 'completed')}
-                      onClick={() => void createCurrentMergeSummary()}
-                    >
-                      {creatingMergeSummary ? <Loader2 className="spin" size={16} /> : <FileText size={16} />} 聚合已完成摘要
-                    </button>
-                    <MergeSummaryPanel items={selectedMergeItems} onPrioritize={(item) => void prioritizeSelectedWorkItem(item)} />
-                    <TopicSummaryPanel items={selectedSummaryItems} onPrioritize={(item) => void prioritizeSelectedWorkItem(item)} />
-                    <button className="primary full" disabled={creatingBranch} onClick={saveBranch}>
-                      {creatingBranch ? <Loader2 className="spin" size={16} /> : <BookmarkPlus size={16} />} 保存为 Branch
-                    </button>
-                  </>
-                ) : (
-                  <div className="empty">还没有候选连续片段</div>
-                )}
-              </div>
-
-              <div className="panel previewPanel compact">
-                <div className="previewHeader">
-                  <h2>桶内消息</h2>
-                  <div className="previewControls">
-                    <button className="secondary" disabled={bucketPage <= 1} onClick={() => setBucketPage(bucketPage - 1)}>
-                      上一页
-                    </button>
-                    <span>
-                      {bucketMessages?.page ?? bucketPage} / {bucketMessages?.total_pages ?? 1}
-                    </span>
-                    <button
-                      className="secondary"
-                      disabled={!bucketMessages || bucketPage >= bucketMessages.total_pages}
-                      onClick={() => setBucketPage(bucketPage + 1)}
-                    >
-                      下一页
-                    </button>
-                  </div>
-                </div>
-                <div className="previewList">
-                  {(bucketMessages?.items ?? []).map((message) => (
-                    <div className="previewRow" key={message.id}>
-                      <span>{message.time}</span>
-                      <strong>{message.sender}</strong>
-                      <p>{message.content}</p>
-                    </div>
-                  ))}
-                  {selectedBucket && bucketMessages && bucketMessages.items.length === 0 && <div className="empty">这个时间桶没有消息</div>}
-                </div>
-              </div>
-
-              <div className="panel previewPanel compact">
-                <div className="previewHeader">
-                  <div>
-                    <h2>消息搜索</h2>
-                    <p>{messageSearchResults ? `${messageSearchResults.total} 条 · ${messageSearchResults.source}` : '按当前片段或时间桶搜索'}</p>
-                  </div>
-                </div>
-                <div className="searchInline">
-                  <input
-                    value={messageSearchQuery}
-                    onChange={(event) => setMessageSearchQuery(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') void runMessageSearch(1);
-                    }}
-                    placeholder="搜索消息内容或发送者"
-                  />
-                  <button className="secondary" disabled={searchingMessages} onClick={() => void runMessageSearch(1)}>
-                    {searchingMessages ? <Loader2 className="spin" size={16} /> : <Search size={16} />} 搜索
-                  </button>
-                </div>
-                <div className="previewList">
-                  {(messageSearchResults?.items ?? []).map((message) => (
-                    <div className="previewRow" key={message.id}>
-                      <span>{message.time}</span>
-                      <strong>{message.sender}</strong>
-                      <p>{message.content}</p>
-                    </div>
-                  ))}
-                  {messageSearchResults && messageSearchResults.items.length === 0 && <div className="empty">没有搜索结果</div>}
-                </div>
-                {messageSearchResults && messageSearchResults.total_pages > 1 && (
-                  <div className="previewControls">
-                    <button
-                      className="secondary"
-                      disabled={messageSearchPage <= 1 || searchingMessages}
-                      onClick={() => void runMessageSearch(messageSearchPage - 1)}
-                    >
-                      上一页
-                    </button>
-                    <span>
-                      {messageSearchResults.page} / {messageSearchResults.total_pages}
-                    </span>
-                    <button
-                      className="secondary"
-                      disabled={messageSearchPage >= messageSearchResults.total_pages || searchingMessages}
-                      onClick={() => void runMessageSearch(messageSearchPage + 1)}
-                    >
-                      下一页
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-          <div className="panel">
-            <div className="bucketHeader">
-              <div>
-                <h2>已保存 Branch</h2>
-                <p>这些片段已经从时间轴探索结果中固化下来，后续可以继续做深度分析。</p>
-              </div>
-            </div>
-            <div className="recordList">
-              {visibleBranches.map((branch) => {
-                const expanded = expandedBranchID === branch.id;
-                return (
-                <div className="recordRow staticRow" key={branch.id}>
-                  <div>
-                    <strong>{branch.title}</strong>
-                    <span>{branch.id}</span>
-                  </div>
-                  <div className="recordMeta">
-                    <span>
-                      <Clock3 size={14} /> {formatDate(branch.start_time)} - {formatDate(branch.end_time)}
-                    </span>
-                    <span>
-                      <Database size={14} /> {branch.message_count} msgs
-                    </span>
-                    <span>
-                      <Activity size={14} /> {branch.status}
-                    </span>
-                    <span>
-                      <Clock3 size={14} /> {branch.total_tokens} tokens
-                    </span>
-                  </div>
-                  <p>{branchSummary(branch)}</p>
-                  <div className="branchActions">
-                    <button className="secondary" disabled={runningBranchID === branch.id || branch.status === 'running'} onClick={() => void runBranch(branch)}>
-                      {runningBranchID === branch.id ? <Loader2 className="spin" size={16} /> : <Activity size={16} />} 运行分析
-                    </button>
-                    {branch.report_markdown && (
-                      <button className="secondary" onClick={() => setExpandedBranchID(expanded ? null : branch.id)}>
-                        {expanded ? '收起结果' : '查看结果'}
-                      </button>
-                    )}
-                    <span className="branchStage">{branch.stage || '等待分析'}</span>
-                  </div>
-                  {expanded && branch.report_markdown && (
-                    <article className="branchReport markdownBody">
-                      <Suspense fallback={<div className="empty">正在渲染结果</div>}>
-                        <MarkdownRenderer>{branch.report_markdown}</MarkdownRenderer>
-                      </Suspense>
-                    </article>
-                  )}
-                  {branch.error && <div className="error">{branch.error}</div>}
-                </div>
-                );
-              })}
-              {visibleBranches.length === 0 && <div className="empty">还没有保存的 Branch</div>}
-            </div>
           </div>
         </div>
       </div>
@@ -1447,6 +1569,7 @@ function WordCloudPanel({
 }
 
 function TopicSummaryPanel({ items, onPrioritize }: { items: AnalysisWorkItem[]; onPrioritize: (item: AnalysisWorkItem) => void }) {
+  const [expanded, setExpanded] = useState(false);
   if (items.length === 0) {
     return <div className="wordCloudPanel mutedPanel">当前选择还没有摘要任务。点击“生成片段摘要”后，会按当前粒度逐个 bucket 生成。</div>;
   }
@@ -1456,6 +1579,7 @@ function TopicSummaryPanel({ items, onPrioritize }: { items: AnalysisWorkItem[];
   const failed = items.find((item) => item.status === 'failed');
   const prioritizable = items.find((item) => item.status === 'queued' || item.status === 'failed') ?? null;
   const status = runningCount > 0 ? 'running' : queuedCount > 0 ? 'queued' : failed ? 'failed' : 'completed';
+  const visibleCompleted = expanded ? completed : completed.slice(0, 3);
   return (
     <div className="summaryPanel">
       <div className="wordCloudHeader">
@@ -1466,7 +1590,7 @@ function TopicSummaryPanel({ items, onPrioritize }: { items: AnalysisWorkItem[];
       </div>
       {completed.length > 0 ? (
         <div className="summaryList">
-          {completed.map((item) => {
+          {visibleCompleted.map((item) => {
             const summary = topicSummaryResult(item);
             if (!summary) return null;
             return (
@@ -1485,6 +1609,11 @@ function TopicSummaryPanel({ items, onPrioritize }: { items: AnalysisWorkItem[];
               </article>
             );
           })}
+          {completed.length > 3 && (
+            <button className="secondary summaryRailToggle" onClick={() => setExpanded((value) => !value)}>
+              {expanded ? '折叠摘要列表' : `展开全部 ${completed.length} 个摘要`}
+            </button>
+          )}
         </div>
       ) : (
         <p>{status === 'running' ? '正在生成摘要。' : failed?.error || '摘要任务已排队。'}</p>
@@ -1508,7 +1637,7 @@ function MergeSummaryPanel({ items, onPrioritize }: { items: AnalysisWorkItem[];
     <div className="summaryPanel mergeSummaryPanel">
       <div className="wordCloudHeader">
         <strong>合并摘要</strong>
-        <span className={`workStatus ${item.status}`}>{item.status}</span>
+        <span className={`workStatus ${item.status}`}>{statusText(item.status)}</span>
       </div>
       {item.status === 'completed' && summary ? (
         <article className="summaryItem">
@@ -1531,6 +1660,87 @@ function MergeSummaryPanel({ items, onPrioritize }: { items: AnalysisWorkItem[];
       {(item.status === 'queued' || item.status === 'failed') && (
         <button className="secondary" onClick={() => onPrioritize(item)}>
           插队生成
+        </button>
+      )}
+    </div>
+  );
+}
+
+function WorkItemOverview({
+  title,
+  items,
+  expectedSummaries = 0,
+  onPrioritize,
+}: {
+  title: string;
+  items: AnalysisWorkItem[];
+  expectedSummaries?: number;
+  onPrioritize: (item: AnalysisWorkItem) => void;
+}) {
+  const stats = workItemStats(items);
+  const coverage = summaryCoverageStats(expectedSummaries, items.filter((item) => item.kind === 'topic_summary'));
+  const active = [...items]
+    .filter((item) => item.status === 'running' || item.status === 'failed')
+    .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))[0];
+  const prioritizable = items.find((item) => item.status === 'queued' || item.status === 'failed') ?? null;
+  if (items.length === 0) {
+    return (
+      <div className="workOverview mutedPanel">
+        <div className="wordCloudHeader">
+          <strong>{title}</strong>
+          <span className="workStatus unseen">未创建</span>
+        </div>
+        <p>当前片段还没有摘要任务。点击“生成片段摘要”后只会处理当前选中范围。</p>
+      </div>
+    );
+  }
+  return (
+    <div className="workOverview">
+      <div className="wordCloudHeader">
+        <strong>{title}</strong>
+        <span className={`workStatus ${stats.primaryStatus}`}>{statusText(stats.primaryStatus)}</span>
+      </div>
+      <div className="workOverviewGrid">
+        <div>
+          <span>总任务</span>
+          <strong>{items.length}</strong>
+        </div>
+        <div>
+          <span>已完成</span>
+          <strong>{stats.completed}</strong>
+        </div>
+        <div>
+          <span>排队/运行</span>
+          <strong>{stats.queued + stats.running}</strong>
+        </div>
+        <div>
+          <span>Tokens</span>
+          <strong>{stats.totalTokens}</strong>
+        </div>
+        <div>
+          <span>摘要覆盖</span>
+          <strong>{coverage.completed}/{coverage.expected}</strong>
+        </div>
+      </div>
+      {!coverage.ready && coverage.expected > 0 && (
+        <p className="workOverviewWarning">完整周期摘要还缺 {coverage.missing} 个 bucket 摘要，先生成缺失摘要。</p>
+      )}
+      <div className="statusChips">
+        {(['completed', 'running', 'queued', 'failed'] as const).map((status) => (
+          <span className={`workStatus ${status}`} key={status}>
+            {statusText(status)} {stats[status]}
+          </span>
+        ))}
+      </div>
+      {active && (
+        <p className="workOverviewActive">
+          {statusText(active.status)} · {workItemKindText(active.kind)} · {formatDate(active.start_time)} - {formatDate(active.end_time)}
+          {active.error ? ` · ${active.error}` : ''}
+        </p>
+      )}
+      {prioritizable && (
+        <button className="secondary" onClick={() => onPrioritize(prioritizable)}>
+          插队下一条
         </button>
       )}
     </div>
@@ -1595,213 +1805,23 @@ function PageTitle({ icon, title, subtitle }: { icon: React.ReactNode; title: st
   );
 }
 
-function TimelineChart({
-  buckets,
-  granularity,
-  selectedBucketID,
-  selectedRange,
-  bucketPeak,
-  onSelectBucket,
-  onSelectRange,
-}: {
-  buckets: TimelineBucket[];
-  granularity: TimelineGranularity;
-  selectedBucketID: string;
-  selectedRange: { start: string; end: string } | null;
-  bucketPeak: number;
-  onSelectBucket: (bucket: TimelineBucket) => void;
-  onSelectRange: (start: string, end: string, firstBucket: TimelineBucket) => void;
-}) {
-  const chartRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!chartRef.current) return;
-
-    const chart = echarts.init(chartRef.current);
-    const chartBuckets = [...buckets].sort(
-      (a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime(),
-    );
-    const data = chartBuckets.map((bucket) => [
-      new Date(bucket.start_time).getTime(),
-      0,
-      bucket.message_count,
-      bucket.id,
-      bucket.end_time,
-      bucket.preview,
-      bucket.analysis_status ?? 'unseen',
-      bucket.summary_status ?? '',
-      bucket.word_cloud_status ?? '',
-      bucket.summary_title ?? '',
-      bucket.total_tokens ?? 0,
-    ]);
-    const selectedStart = selectedRange ? new Date(selectedRange.start).getTime() : null;
-    const selectedEnd = selectedRange ? new Date(selectedRange.end).getTime() : null;
-    const [xMin, xMax] = timelineExtent(chartBuckets, granularity);
-
-    chart.setOption({
-      animation: false,
-      backgroundColor: 'transparent',
-      grid: { left: 24, right: 18, top: 28, bottom: 52 },
-      tooltip: {
-        trigger: 'item',
-        confine: true,
-        formatter: (params: any) => {
-          const index = params.dataIndex as number;
-          const bucket = chartBuckets[index];
-          if (!bucket) return '';
-          const title = bucket.summary_title || bucket.preview;
-          const preview = title ? `<br/><span style="color:#5f6f72">${escapeHtml(title.slice(0, 80))}</span>` : '';
-          const summaryStatus = bucket.summary_status ? `<br/>摘要：${bucket.summary_status}` : '';
-          const wordCloudStatus = bucket.word_cloud_status ? ` · 词云：${bucket.word_cloud_status}` : '';
-          const tokens = bucket.total_tokens ? `<br/>${bucket.total_tokens} tokens` : '';
-          return `<strong>${formatBucketWindow(bucket)}</strong><br/>${bucket.message_count} 条消息 · ${bucket.participant_count} 人${summaryStatus}${wordCloudStatus}${tokens}${preview}`;
-        },
-      },
-      brush: {
-        xAxisIndex: 'all',
-        brushMode: 'single',
-        throttleType: 'debounce',
-        throttleDelay: 180,
-        brushStyle: {
-          color: 'rgba(19, 93, 102, 0.12)',
-          borderColor: '#135d66',
-          borderWidth: 1,
-        },
-      },
-      dataZoom: [
-        { type: 'inside', xAxisIndex: 0, filterMode: 'none', zoomOnMouseWheel: true, moveOnMouseMove: true },
-        {
-          type: 'slider',
-          xAxisIndex: 0,
-          bottom: 8,
-          height: 20,
-          filterMode: 'none',
-          borderColor: '#d8e0df',
-          fillerColor: 'rgba(19, 93, 102, 0.12)',
-          handleStyle: { color: '#135d66' },
-          textStyle: { color: '#6d7d80' },
-        },
-      ],
-      xAxis: {
-        type: 'time',
-        min: xMin,
-        max: xMax,
-        axisLine: { lineStyle: { color: '#aebcbd' } },
-        axisTick: { show: false },
-        axisLabel: {
-          color: '#657577',
-          hideOverlap: true,
-          formatter: (value: number) => formatTimelineAxisLabel(value, granularity),
-        },
-        splitLine: { show: false },
-      },
-      yAxis: {
-        type: 'value',
-        show: false,
-        min: -1,
-        max: 1,
-      },
-      series: [
-        {
-          type: 'line',
-          data: data.map((item) => [item[0], 0]),
-          symbol: 'none',
-          lineStyle: { color: '#b7c6c7', width: 2 },
-          silent: true,
-          markArea:
-            selectedStart !== null && selectedEnd !== null
-              ? {
-                  silent: true,
-                  itemStyle: { color: 'rgba(19, 93, 102, 0.08)' },
-                  data: [[{ xAxis: selectedStart }, { xAxis: selectedEnd }]],
-                }
-              : undefined,
-        },
-        {
-          type: 'scatter',
-          data,
-          symbolSize: (value: unknown[]) => {
-            const count = Number(value[2] ?? 0);
-            return Math.max(9, Math.min(30, 9 + (count / Math.max(bucketPeak, 1)) * 21));
-          },
-          itemStyle: {
-            color: (params: any) => bucketStatusColor(params.data?.[6], params.data?.[3] === selectedBucketID),
-            borderColor: '#ffffff',
-            borderWidth: 2,
-            shadowBlur: 8,
-            shadowColor: 'rgba(19, 93, 102, 0.22)',
-          },
-          emphasis: {
-            scale: 1.2,
-            itemStyle: { color: '#0a3f46' },
-          },
-          label: {
-            show: true,
-            position: 'top',
-            formatter: (params: any) => {
-              const count = String(params.data?.[2] ?? '');
-              const marker = bucketStatusMarker(params.data?.[6]);
-              return `${count}${marker}`;
-            },
-            color: '#26383b',
-            fontSize: 11,
-          },
-        },
-      ],
-      graphic:
-        buckets.length === 0
-          ? [
-              {
-                type: 'text',
-                left: 'center',
-                top: 'middle',
-                style: { text: '暂无时间桶', fill: '#7a888a', fontSize: 14 },
-              },
-            ]
-          : [],
-    });
-
-    if (buckets.length > 0) {
-      chart.dispatchAction({
-        type: 'takeGlobalCursor',
-        key: 'brush',
-        brushOption: { brushType: 'rect', brushMode: 'single' },
-      });
-    }
-
-    const handleClick = (params: any) => {
-      const bucketID = params.data?.[3];
-      const bucket = chartBuckets.find((item) => item.id === bucketID);
-      if (bucket) onSelectBucket(bucket);
-    };
-    const handleBrushSelected = (params: any) => {
-      const selected = params.batch?.[0]?.selected?.[1]?.dataIndex ?? [];
-      if (!Array.isArray(selected) || selected.length === 0) return;
-      const selectedBuckets = selected
-        .map((index: number) => chartBuckets[index])
-        .filter(Boolean)
-        .sort((a: TimelineBucket, b: TimelineBucket) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime());
-      if (selectedBuckets.length === 0) return;
-      const first = selectedBuckets[0];
-      const last = selectedBuckets[selectedBuckets.length - 1];
-      onSelectRange(first.start_time, last.end_time, first);
-    };
-
-    chart.on('click', handleClick);
-    chart.on('brushSelected', handleBrushSelected);
-
-    const resizeObserver = new ResizeObserver(() => chart.resize());
-    resizeObserver.observe(chartRef.current);
-
-    return () => {
-      resizeObserver.disconnect();
-      chart.off('click', handleClick);
-      chart.off('brushSelected', handleBrushSelected);
-      chart.dispose();
-    };
-  }, [buckets, bucketPeak, granularity, onSelectBucket, onSelectRange, selectedBucketID, selectedRange]);
-
-  return <div className="timelineChart" ref={chartRef} aria-label="聊天记录时间轴" />;
+function InteractionFlow() {
+  return (
+    <div className="interactionFlow">
+      <div>
+        <strong>1</strong>
+        <span>选择时间</span>
+      </div>
+      <div>
+        <strong>2</strong>
+        <span>插队分析</span>
+      </div>
+      <div>
+        <strong>3</strong>
+        <span>阅读证据</span>
+      </div>
+    </div>
+  );
 }
 
 function formatDate(value: string) {
@@ -1818,54 +1838,12 @@ function formatBucketWindow(bucket: TimelineBucket) {
   return `${formatDate(bucket.start_time)} - ${formatDate(bucket.end_time)}`;
 }
 
-function timelineExtent(buckets: TimelineBucket[], granularity: TimelineGranularity): [number | undefined, number | undefined] {
-  if (buckets.length === 0) return [undefined, undefined];
-  const firstStart = new Date(buckets[0].start_time).getTime();
-  const lastEnd = new Date(buckets[buckets.length - 1].end_time).getTime();
-  const span = Math.max(lastEnd - firstStart, granularityDurationMs(granularity));
-  const padding = Math.max(span * 0.04, granularityDurationMs(granularity) / 2);
-  return [firstStart - padding, lastEnd + padding];
+function rangesOverlap(startA: string, endA: string, startB: string, endB: string) {
+  return Date.parse(startA) < Date.parse(endB) && Date.parse(startB) < Date.parse(endA);
 }
 
-function granularityDurationMs(granularity: TimelineGranularity) {
-  switch (granularity) {
-    case 'year':
-      return 365 * 24 * 60 * 60 * 1000;
-    case 'month':
-      return 31 * 24 * 60 * 60 * 1000;
-    case 'week':
-      return 7 * 24 * 60 * 60 * 1000;
-    case 'day':
-      return 24 * 60 * 60 * 1000;
-    case '15m':
-      return 15 * 60 * 1000;
-    case '5m':
-      return 5 * 60 * 1000;
-    default:
-      return 60 * 60 * 1000;
-  }
-}
-
-function formatTimelineAxisLabel(value: number, granularity: TimelineGranularity) {
-  const date = new Date(value);
-  const options: Intl.DateTimeFormatOptions =
-    granularity === 'year'
-      ? { year: 'numeric' }
-      : granularity === 'month'
-        ? { year: '2-digit', month: '2-digit' }
-        : granularity === 'week' || granularity === 'day'
-          ? { month: '2-digit', day: '2-digit' }
-          : { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' };
-  return new Intl.DateTimeFormat('zh-CN', options).format(date);
-}
-
-function escapeHtml(value: string) {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
+function rangeContains(containerStart: string, containerEnd: string, itemStart: string, itemEnd: string) {
+  return Date.parse(itemStart) >= Date.parse(containerStart) && Date.parse(itemEnd) <= Date.parse(containerEnd);
 }
 
 function formatBucketRange(bucket: TimelineBucket) {
@@ -1920,37 +1898,106 @@ function bucketStatusColor(status: unknown, selected: boolean) {
       return '#b3261e';
     case 'completed':
       return '#20845a';
+    case 'unseen':
+      return '#98a7aa';
     default:
-      return '#15808c';
+      return '#98a7aa';
   }
 }
 
-function bucketStatusMarker(status: unknown) {
+function statusText(status?: string) {
   switch (status) {
     case 'running':
-      return ' · 运行';
+      return '分析中';
     case 'queued':
-      return ' · 排队';
-    case 'failed':
-      return ' · 失败';
+      return '排队中';
     case 'completed':
-      return ' · 完成';
+      return '已完成';
+    case 'failed':
+      return '失败';
+    case 'unseen':
+    case '':
+    case undefined:
+      return '未创建';
     default:
-      return '';
+      return status;
   }
+}
+
+function workItemKindText(kind: string) {
+  switch (kind) {
+    case 'topic_summary':
+      return '桶摘要';
+    case 'summary_merge':
+      return '合并摘要';
+    case 'word_cloud':
+      return '词云';
+    default:
+      return kind;
+  }
+}
+
+function workItemStats(items: AnalysisWorkItem[]) {
+  const stats = {
+    completed: 0,
+    running: 0,
+    queued: 0,
+    failed: 0,
+    totalTokens: 0,
+    primaryStatus: 'unseen',
+  };
+  for (const item of items) {
+    if (item.status === 'completed') stats.completed++;
+    if (item.status === 'running') stats.running++;
+    if (item.status === 'queued') stats.queued++;
+    if (item.status === 'failed') stats.failed++;
+    stats.totalTokens += item.total_tokens || 0;
+  }
+  stats.primaryStatus = stats.running > 0 ? 'running' : stats.queued > 0 ? 'queued' : stats.failed > 0 ? 'failed' : stats.completed > 0 ? 'completed' : 'unseen';
+  return stats;
+}
+
+function summaryCoverageStats(expected: number, items: AnalysisWorkItem[]) {
+  const uniqueCompletedScopes = new Set<string>();
+  for (const item of items) {
+    if (item.status === 'completed') {
+      uniqueCompletedScopes.add(item.scope_id);
+    }
+  }
+  const completed = uniqueCompletedScopes.size;
+  const missing = Math.max(0, expected - completed);
+  return {
+    expected,
+    completed,
+    missing,
+    ready: expected > 0 && completed >= expected,
+  };
+}
+
+function bucketAnalysisStats(buckets: TimelineBucket[]) {
+  const stats = { completed: 0, running: 0, queued: 0, failed: 0, unseen: 0 };
+  for (const bucket of buckets) {
+    const status = bucket.analysis_status || 'unseen';
+    if (status === 'completed') stats.completed++;
+    else if (status === 'running') stats.running++;
+    else if (status === 'queued') stats.queued++;
+    else if (status === 'failed') stats.failed++;
+    else stats.unseen++;
+  }
+  return stats;
 }
 
 function BucketStatusStrip({ bucket }: { bucket: TimelineBucket }) {
   const entries = [
-    ['summary', bucket.summary_status || 'unseen'],
-    ['word cloud', bucket.word_cloud_status || 'unseen'],
-    ['analysis', bucket.analysis_status || 'unseen'],
+    ['摘要', bucket.summary_status || 'unseen'],
+    ['词云', bucket.word_cloud_status || 'unseen'],
+    ['整体', bucket.analysis_status || 'unseen'],
   ];
   return (
     <div className="bucketStatusStrip">
       {entries.map(([label, status]) => (
         <span className={`workStatus ${status}`} key={label}>
-          {label}: {status}
+          {label}: {statusText(status)}
         </span>
       ))}
     </div>

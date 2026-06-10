@@ -297,7 +297,7 @@ func TestJobBranchPreviewEndpoint(t *testing.T) {
 	if previewRec.Code != http.StatusOK {
 		t.Fatalf("preview status = %d body = %s", previewRec.Code, previewRec.Body.String())
 	}
-	if !strings.Contains(previewRec.Body.String(), `"message_count":4`) || !strings.Contains(previewRec.Body.String(), `"status":"unseen"`) {
+	if !strings.Contains(previewRec.Body.String(), `"message_count":2`) || !strings.Contains(previewRec.Body.String(), `"status":"unseen"`) {
 		t.Fatalf("preview body = %s", previewRec.Body.String())
 	}
 
@@ -341,7 +341,7 @@ func TestJobBranchCreateAndListEndpoints(t *testing.T) {
 	if createRec.Code != http.StatusCreated {
 		t.Fatalf("branch create status = %d body = %s", createRec.Code, createRec.Body.String())
 	}
-	if !strings.Contains(createRec.Body.String(), `"title":"午饭话题"`) || !strings.Contains(createRec.Body.String(), `"message_count":4`) {
+	if !strings.Contains(createRec.Body.String(), `"title":"午饭话题"`) || !strings.Contains(createRec.Body.String(), `"message_count":2`) {
 		t.Fatalf("branch create body = %s", createRec.Body.String())
 	}
 	var firstBranch struct {
@@ -678,6 +678,25 @@ func TestAnalysisDetailAndReportEndpoints(t *testing.T) {
 	handler.ServeHTTP(reportRec, reportReq)
 	if reportRec.Code != http.StatusOK || !strings.Contains(reportRec.Body.String(), "# Report") {
 		t.Fatalf("report status = %d body = %s", reportRec.Code, reportRec.Body.String())
+	}
+}
+
+func TestNormalizeStoredSenderRestoresParticipantIDs(t *testing.T) {
+	senderMap := map[string]string{}
+	if got := normalizeStoredSender("我", senderMap); got != "PERSON_A" {
+		t.Fatalf("self sender = %s", got)
+	}
+	if got := normalizeStoredSender("小青", senderMap); got != "PERSON_B" {
+		t.Fatalf("first peer sender = %s", got)
+	}
+	if got := normalizeStoredSender("小青", senderMap); got != "PERSON_B" {
+		t.Fatalf("same peer sender = %s", got)
+	}
+	if got := normalizeStoredSender("另一个人", senderMap); got != "PERSON_3" {
+		t.Fatalf("second peer sender = %s", got)
+	}
+	if got := normalizeStoredSender("PERSON_A", senderMap); got != "PERSON_A" {
+		t.Fatalf("normalized sender = %s", got)
 	}
 }
 

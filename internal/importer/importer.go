@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kevinmatthe/record_analysis/internal/model"
+	"github.com/kevinmatthe/record_analysis/internal/textclean"
 )
 
 var txtMessagePattern = regexp.MustCompile(`^\[([^\]]+)\]\s+([^:：]+)[:：]\s?(.*)$`)
@@ -29,7 +30,20 @@ type rawMessage struct {
 	Content   string      `json:"content"`
 }
 
+type ParseStats struct {
+	RawRows         int
+	NormalizedRows  int
+	FilteredRows    int
+	ParticipantRows int
+	SystemRows      int
+}
+
 func ParseChatFile(path string, relationshipID string, includeSystem bool) ([]model.Message, error) {
+	messages, _, err := ParseChatFileWithStats(path, relationshipID, includeSystem)
+	return messages, err
+}
+
+func ParseChatFileWithStats(path string, relationshipID string, includeSystem bool) ([]model.Message, ParseStats, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	var rows []rawMessage
 	var err error
@@ -41,17 +55,25 @@ func ParseChatFile(path string, relationshipID string, includeSystem bool) ([]mo
 	case ".json":
 		rows, err = parseJSON(path)
 	default:
-		return nil, fmt.Errorf("unsupported chat file format: %s", ext)
+		return nil, ParseStats{}, fmt.Errorf("unsupported chat file format: %s", ext)
 	}
 	if err != nil {
-		return nil, err
+		return nil, ParseStats{}, err
 	}
 	messages, err := normalizeRows(rows, relationshipID, strings.TrimPrefix(ext, "."))
 	if err != nil {
-		return nil, err
+		return nil, ParseStats{}, err
+	}
+	stats := ParseStats{RawRows: len(rows), NormalizedRows: len(messages), FilteredRows: len(rows) - len(messages)}
+	for _, message := range messages {
+		if message.Sender == "PERSON_A" || message.Sender == "PERSON_B" {
+			stats.ParticipantRows++
+		} else {
+			stats.SystemRows++
+		}
 	}
 	if includeSystem {
-		return messages, nil
+		return messages, stats, nil
 	}
 	filtered := messages[:0]
 	for _, message := range messages {
@@ -59,7 +81,7 @@ func ParseChatFile(path string, relationshipID string, includeSystem bool) ([]mo
 			filtered = append(filtered, message)
 		}
 	}
-	return filtered, nil
+	return filtered, stats, nil
 }
 
 func parseTXT(path string) ([]rawMessage, error) {
@@ -141,7 +163,8 @@ func normalizeRows(rows []rawMessage, relationshipID string, source string) ([]m
 			return nil, err
 		}
 		sender := normalizeSender(strings.TrimSpace(row.Sender), senderMap)
-		content := strings.TrimSpace(row.Content)
+		rawContent := strings.TrimSpace(row.Content)
+		content := textclean.CleanMessageText(rawContent)
 		msgType := row.TypeName
 		if msgType == "" && row.Type != nil {
 			msgType = fmt.Sprint(row.Type)
@@ -160,7 +183,7 @@ func normalizeRows(rows []rawMessage, relationshipID string, source string) ([]m
 			MsgTime:        msgTime,
 			MsgType:        msgType,
 			Content:        content,
-			RawContent:     content,
+			RawContent:     rawContent,
 			Source:         source,
 			ContentHash:    contentHash(sender, msgTime, content),
 		})
@@ -214,6 +237,9 @@ func normalizeSender(sender string, senderMap map[string]string) string {
 func isMeaningfulText(content string, msgType string) bool {
 	content = strings.TrimSpace(content)
 	if content == "" {
+		return false
+	}
+	if !textclean.IsNaturalMessageText(content) {
 		return false
 	}
 	normalizedType := strings.ToLower(strings.TrimSpace(msgType))
