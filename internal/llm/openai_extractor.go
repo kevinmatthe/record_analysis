@@ -189,6 +189,29 @@ func (e *OpenAICompatibleExtractor) GenerateReport(ctx context.Context, input Re
 	}, nil
 }
 
+func (e *OpenAICompatibleExtractor) MergeReports(ctx context.Context, input ReportMergeInput) (model.PeriodReport, error) {
+	task := BuildReportMergeTask(input)
+	var response struct {
+		ReportMarkdown   string   `json:"report_markdown"`
+		EvidenceEventIDs []string `json:"evidence_event_ids"`
+		EvidenceMsgIDs   []string `json:"evidence_msg_ids"`
+		Confidence       float64  `json:"confidence"`
+		Uncertainty      string   `json:"uncertainty"`
+	}
+	if err := e.completeJSON(ctx, "llm/prompts/report_merge.md", task, "report_merge", "llm/schemas/report.schema.json", &response); err != nil {
+		return model.PeriodReport{}, err
+	}
+	return model.PeriodReport{
+		RelationshipID:   input.RelationshipID,
+		PeriodType:       "branch_merge",
+		PeriodStart:      parseReportMergeTime(input.PeriodStart),
+		PeriodEnd:        parseReportMergeTime(input.PeriodEnd),
+		Markdown:         response.ReportMarkdown,
+		EvidenceEventIDs: response.EvidenceEventIDs,
+		ModelName:        e.model,
+	}, nil
+}
+
 func (e *OpenAICompatibleExtractor) SummarizeTopic(ctx context.Context, input TopicSummaryInput) (TopicSummary, error) {
 	task := BuildTopicSummaryTask(input)
 	var response TopicSummary
@@ -203,6 +226,16 @@ func (e *OpenAICompatibleExtractor) SummarizeTopic(ctx context.Context, input To
 	}
 	response.ModelName = e.model
 	return response, nil
+}
+
+func parseReportMergeTime(value string) time.Time {
+	if value == "" {
+		return time.Time{}
+	}
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return parsed
+	}
+	return time.Time{}
 }
 
 func (e *OpenAICompatibleExtractor) MergeTopicSummaries(ctx context.Context, input TopicSummaryMergeInput) (TopicSummary, error) {

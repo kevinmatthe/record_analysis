@@ -59,6 +59,7 @@ export function TimelineSummaryRail({
 function formatDate(value: string) {
   if (!value || value.startsWith('0001-')) return '未知时间';
   return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',

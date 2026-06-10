@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import {
   Activity,
   ArrowRight,
@@ -14,6 +14,7 @@ import {
   LogOut,
   Search,
   UploadCloud,
+  X,
   ZoomIn,
 } from 'lucide-react';
 import {
@@ -32,7 +33,9 @@ import {
   createJobBranch,
   createSummaryMergeWorkItem,
   createAnalysisJob,
+  getBranch,
   getJob,
+  getJobMessagesByIDs,
   getJobPreview,
   getJobTimeline,
   getTimelineBucketMessages,
@@ -53,19 +56,21 @@ import {
   seedWorkItems,
 } from './api';
 import {
-  BranchInspector,
+  CanvasTimelineRenderer,
   EChartsTimelineRenderer,
-  InsightInspector,
   TimelineActionDock,
+  TimelineDetailPanel,
+  TimelineDetailSelection,
   TimelineFloatPanels,
   TimelineHeaderControls,
-  TimelineSummaryRail,
   TimelineUtilityDrawer,
   TimelineUtilityPanel,
 } from './timeline';
 
+const MarkdownRenderer = lazy(() => import('react-markdown'));
+
 type View = 'analysis' | 'history' | 'job' | 'report' | 'branch' | 'account';
-type RouteState = { view: View; reportID?: string; jobID?: string; branchID?: string };
+type RouteState = { view: View; reportID?: string; jobID?: string; branchID?: string; range?: TimelineRange; entity?: string };
 type TimelineRange = { start: string; end: string };
 
 export function App() {
@@ -110,6 +115,15 @@ export function App() {
       void openReportByID(route.reportID);
     }
   }, [authChecked, route, user]);
+
+  useEffect(() => {
+    if (!authChecked || !user || route.view !== 'history') return;
+    if (jobs.every((job) => job.status !== 'running' && job.status !== 'queued')) return;
+    const timer = window.setInterval(() => {
+      void refreshHistory();
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [authChecked, user, route.view, historyJobsStatusSignature(jobs)]);
 
   async function refreshHistory(filter = historyFilter) {
     setHistoryLoading(true);
@@ -172,7 +186,7 @@ export function App() {
   }
 
   return (
-    <div className="shell">
+    <div className={`shell ${route.view === 'job' ? 'timelineMode' : ''}`}>
       <aside className="sidebar">
         <div className="brand">
           <div className="brandMark">RA</div>
@@ -224,6 +238,7 @@ export function App() {
         {route.view === 'job' && (
           <JobDetailPage
             initialJob={selectedJob}
+            route={route}
             onBack={() => navigateTo({ view: 'history' })}
             onOpenReport={(record) => void openReport(record)}
           />
@@ -542,6 +557,8 @@ function HistoryPage({
   onOpen: (record: AnalysisRecord) => void;
   onOpenJob: (job: AnalysisJob) => void;
 }) {
+  const activeJobs = jobs.filter((job) => job.status === 'running' || job.status === 'queued');
+  const latestJobs = jobs.slice(0, 3);
   return (
     <section className="page">
       <PageTitle icon={<History size={22} />} title="历史分析记录" subtitle="按关系 ID 查询任务状态和已完成报告" />
@@ -553,6 +570,32 @@ function HistoryPage({
         <button className="secondary" onClick={onSearch}>
           {loading ? <Loader2 className="spin" size={16} /> : <Search size={16} />} 查询
         </button>
+      </div>
+      <div className="historyOverview">
+        <div className="historyOverviewHeader">
+          <div>
+            <span>运行中</span>
+            <strong>{activeJobs.length}</strong>
+          </div>
+          <div>
+            <span>最近任务</span>
+            <strong>{latestJobs.length}</strong>
+          </div>
+          <div>
+            <span>完成报告</span>
+            <strong>{records.length}</strong>
+          </div>
+        </div>
+        <div className="historyQuickList">
+          {(activeJobs.length > 0 ? activeJobs : latestJobs).map((job) => (
+            <button className="historyQuickJob" key={job.id} onClick={() => onOpenJob(job)}>
+              <span className={`workStatus ${job.status}`}>{statusText(job.status)}</span>
+              <strong>{job.relationship_id}</strong>
+              <small>{job.stage || formatDate(job.created_at)}</small>
+            </button>
+          ))}
+          {!loading && jobs.length === 0 && <div className="empty">暂无可恢复任务</div>}
+        </div>
       </div>
       <div className="historySections">
         <section>
@@ -622,10 +665,12 @@ function HistoryPage({
 
 function JobDetailPage({
   initialJob,
+  route,
   onBack,
   onOpenReport,
 }: {
   initialJob: AnalysisJob | null;
+  route: RouteState;
   onBack: () => void;
   onOpenReport: (record: AnalysisRecord) => void;
 }) {
@@ -633,6 +678,8 @@ function JobDetailPage({
   const [granularity, setGranularity] = useState<'auto' | TimelineGranularity>('auto');
   const [resolvedGranularity, setResolvedGranularity] = useState<TimelineGranularity>('hour');
   const [timeline, setTimeline] = useState<TimelineBucket[]>([]);
+  const [insightBuckets, setInsightBuckets] = useState<TimelineBucket[]>([]);
+  const [globalActionBuckets, setGlobalActionBuckets] = useState<TimelineBucket[]>([]);
   const [clusters, setClusters] = useState<TimelineCluster[]>([]);
   const [selectedBucket, setSelectedBucket] = useState<TimelineBucket | null>(null);
   const [selectedCluster, setSelectedCluster] = useState<TimelineCluster | null>(null);
@@ -662,7 +709,17 @@ function JobDetailPage({
   const [loadingTimeline, setLoadingTimeline] = useState(false);
   const [openTimelinePanel, setOpenTimelinePanel] = useState<'scope' | 'bucket' | 'evidence' | null>('scope');
   const [openUtilityPanel, setOpenUtilityPanel] = useState<TimelineUtilityPanel | null>(null);
+  const [fullscreenUtilityPanel, setFullscreenUtilityPanel] = useState<TimelineUtilityPanel | null>(null);
+  const [fullscreenBranch, setFullscreenBranch] = useState<AnalysisBranch | null>(null);
+  const [loadingFullscreenBranch, setLoadingFullscreenBranch] = useState(false);
+  const [detailPanelOpen, setDetailPanelOpen] = useState(false);
   const [selectedInsightID, setSelectedInsightID] = useState<string | null>(null);
+  const [timelineRenderer, setTimelineRenderer] = useState<'echarts' | 'canvas'>('echarts');
+  const lastTimelineSignatureRef = useRef('');
+  const routeStateAppliedKey = useMemo(() => {
+    if (!initialJob?.id) return '';
+    return `${initialJob.id}|${window.location.hash}`;
+  }, [initialJob?.id]);
 
   useEffect(() => {
     setJob(initialJob);
@@ -679,16 +736,27 @@ function JobDetailPage({
 
   useEffect(() => {
     if (!job) return;
-    setLoadingTimeline(true);
+    let cancelled = false;
     void loadAdaptiveTimeline(job.id, granularity, timelineWindow)
       .then((data) => {
+        if (cancelled) return;
+        const signature = timelineDataSignature(data.actualGranularity, data.items, data.clusters ?? []);
+        if (signature === lastTimelineSignatureRef.current) {
+          return;
+        }
+        lastTimelineSignatureRef.current = signature;
         setResolvedGranularity(data.actualGranularity);
         setTimeline(data.items);
         setClusters(data.clusters ?? []);
         setSelectedBucket((current) => data.items.find((item) => item.id === current?.id) ?? data.items[0] ?? null);
         setSelectedCluster((current) => (current ? data.clusters.find((item) => item.id === current.id) ?? null : null));
       })
-      .finally(() => setLoadingTimeline(false));
+      .finally(() => {
+        if (!cancelled) setLoadingTimeline(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [job?.id, granularity, timelineWindow?.start, timelineWindow?.end]);
 
   useEffect(() => {
@@ -785,7 +853,37 @@ function JobDetailPage({
     void refreshWorkItems();
     void refreshSummaryItems();
     void refreshMergeItems();
-  }, [job?.id, resolvedGranularity]);
+  }, [job?.id, resolvedGranularity, selectedBucket?.id, selectedCluster?.id, selectedRange?.start, selectedRange?.end, timelineWindow?.start, timelineWindow?.end]);
+
+  useEffect(() => {
+    if (!job) {
+      setInsightBuckets([]);
+      return;
+    }
+    const range = currentNodeRange();
+    if (!range) {
+      setInsightBuckets([]);
+      return;
+    }
+    void getJobTimeline(job.id, childInsightGranularity(), range)
+      .then((data) => setInsightBuckets(data.items ?? []))
+      .catch(() => setInsightBuckets([]));
+  }, [job?.id, resolvedGranularity, selectedBucket?.id, selectedCluster?.id, selectedRange?.start, selectedRange?.end, timelineWindow?.start, timelineWindow?.end]);
+
+  useEffect(() => {
+    if (!job) {
+      setGlobalActionBuckets([]);
+      return;
+    }
+    const range = globalActionRange();
+    if (!range) {
+      setGlobalActionBuckets([]);
+      return;
+    }
+    void getJobTimeline(job.id, childInsightGranularity(), range)
+      .then((data) => setGlobalActionBuckets(data.items ?? []))
+      .catch(() => setGlobalActionBuckets([]));
+  }, [job?.id, resolvedGranularity, timelineWindow?.start, timelineWindow?.end, timeline.length, timeline[0]?.start_time, timeline[timeline.length - 1]?.end_time]);
 
   useEffect(() => {
     const activeItems = [...workItems, ...summaryItems, ...mergeItems];
@@ -796,13 +894,45 @@ function JobDetailPage({
       void refreshMergeItems();
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [job?.id, resolvedGranularity, workItems, summaryItems, mergeItems]);
+  }, [job?.id, resolvedGranularity, workItemStatusSignature(workItems, summaryItems, mergeItems)]);
 
   useEffect(() => {
     if (branchPreview) {
       setBranchTitle(branchPreview.topic_hint || '');
     }
   }, [branchPreview?.cluster_id, branchPreview?.start_time, branchPreview?.end_time]);
+
+  useEffect(() => {
+    if (!job || route.view !== 'job' || route.jobID !== job.id) return;
+    if (route.range) {
+      setTimelineWindow(route.range);
+      setSelectedRange(route.range);
+      setSelectedCluster(null);
+      const bucket = timeline.find((candidate) => rangesOverlap(candidate.start_time, candidate.end_time, route.range!.start, route.range!.end));
+      if (bucket) {
+        setSelectedBucket(bucket);
+      }
+    }
+    if (route.entity) {
+      if (route.entity.startsWith('branch:')) {
+        setExpandedBranchID(route.entity.slice('branch:'.length));
+        setSelectedInsightID(null);
+      }
+      if (route.entity.startsWith('insight:')) {
+        setSelectedInsightID(route.entity.slice('insight:'.length));
+        setExpandedBranchID(null);
+      }
+    }
+  }, [routeStateAppliedKey, job?.id, timeline.length]);
+
+  useEffect(() => {
+    if (!job || route.view !== 'job' || route.jobID !== job.id) return;
+    const entity = expandedBranchID ? `branch:${expandedBranchID}` : selectedInsightID ? `insight:${selectedInsightID}` : undefined;
+    const hash = routeToHash({ view: 'job', jobID: job.id, range: selectedRange ?? undefined, entity });
+    if (window.location.hash !== hash) {
+      window.history.replaceState(null, '', hash);
+    }
+  }, [job?.id, route.view, route.jobID, selectedRange?.start, selectedRange?.end, expandedBranchID, selectedInsightID]);
 
   if (!job) {
     return (
@@ -869,39 +999,57 @@ function JobDetailPage({
 
   async function refreshWorkItems() {
     if (!job) return;
-    const data = await listWorkItems(job.id, 'word_cloud', resolvedGranularity).catch(() => ({ items: [] }));
+    const data = await listWorkItems(job.id, 'word_cloud', childInsightGranularity(), currentNodeRange()).catch(() => ({ items: [] }));
     setWorkItems(data.items ?? []);
   }
 
   async function refreshSummaryItems() {
     if (!job) return;
-    const data = await listWorkItems(job.id, 'topic_summary', resolvedGranularity).catch(() => ({ items: [] }));
+    const data = await listWorkItems(job.id, 'topic_summary', childInsightGranularity(), currentNodeRange()).catch(() => ({ items: [] }));
     setSummaryItems(data.items ?? []);
   }
 
   async function refreshMergeItems() {
     if (!job) return;
-    const data = await listWorkItems(job.id, 'summary_merge', resolvedGranularity).catch(() => ({ items: [] }));
+    const data = await listWorkItems(job.id, 'summary_merge', childInsightGranularity(), currentNodeRange()).catch(() => ({ items: [] }));
     setMergeItems(data.items ?? []);
   }
 
   async function seedWordClouds() {
+    return seedWordCloudsForRange(currentNodeRange());
+  }
+
+  async function seedGlobalWordClouds() {
+    return seedWordCloudsForRange(globalActionRange());
+  }
+
+  async function seedWordCloudsForRange(range: TimelineRange | null) {
     if (!job) return;
     setSeedingWorkItems(true);
     try {
-      const data = await seedWorkItems(job.id, resolvedGranularity, 'word_cloud', currentAnalysisRange());
+      const data = await seedWorkItems(job.id, childInsightGranularity(), 'word_cloud', range);
       setWorkItems((current) => mergeWorkItems(current, data.items ?? []));
+      openUtilityOverlay('insights');
     } finally {
       setSeedingWorkItems(false);
     }
   }
 
   async function seedTopicSummaries() {
+    return seedTopicSummariesForRange(currentNodeRange());
+  }
+
+  async function seedGlobalTopicSummaries() {
+    return seedTopicSummariesForRange(globalActionRange());
+  }
+
+  async function seedTopicSummariesForRange(range: TimelineRange | null) {
     if (!job) return;
     setSeedingSummaries(true);
     try {
-      const data = await seedWorkItems(job.id, resolvedGranularity, 'topic_summary', currentAnalysisRange());
+      const data = await seedWorkItems(job.id, childInsightGranularity(), 'topic_summary', range);
       setSummaryItems((current) => mergeWorkItems(current, data.items ?? []));
+      openUtilityOverlay('insights');
     } finally {
       setSeedingSummaries(false);
     }
@@ -920,6 +1068,52 @@ function JobDetailPage({
     return null;
   }
 
+  function currentNodeRange(): TimelineRange | null {
+    if (selectedRange) {
+      return selectedRange;
+    }
+    if (selectedCluster) {
+      return { start: selectedCluster.start_time, end: selectedCluster.end_time };
+    }
+    if (selectedBucket) {
+      return { start: selectedBucket.start_time, end: selectedBucket.end_time };
+    }
+    return timelineWindow ?? visibleTimelineRange();
+  }
+
+  function visibleTimelineRange(): TimelineRange | null {
+    if (timeline.length === 0) return null;
+    return {
+      start: timeline[0].start_time,
+      end: timeline[timeline.length - 1].end_time,
+    };
+  }
+
+  function globalActionRange(): TimelineRange | null {
+    return timelineWindow ?? visibleTimelineRange();
+  }
+
+  function childInsightGranularity(): TimelineGranularity {
+    switch (resolvedGranularity) {
+      case 'year':
+        return 'month';
+      case 'month':
+        return 'week';
+      case 'week':
+        return 'day';
+      case 'day':
+        return 'hour';
+      case 'hour':
+        return '15m';
+      default:
+        return '5m';
+    }
+  }
+
+  function childInsightBucketIDs() {
+    return new Set(insightBuckets.map((bucket) => bucket.id));
+  }
+
   async function prioritizeSelectedWorkItem(item: AnalysisWorkItem) {
     if (!job) return;
     const next = await prioritizeWorkItem(job.id, item.id);
@@ -930,16 +1124,35 @@ function JobDetailPage({
 
   async function createCurrentMergeSummary() {
     if (!job) return;
-    const range = currentAnalysisRange();
+    const range = currentNodeRange();
     if (!range) return;
     setCreatingMergeSummary(true);
     try {
       const item = await createSummaryMergeWorkItem(job.id, {
-        granularity: resolvedGranularity,
+        granularity: childInsightGranularity(),
         start_time: range.start,
         end_time: range.end,
       });
       setMergeItems((current) => [item, ...current.filter((candidate) => candidate.id !== item.id)]);
+      openUtilityOverlay('insights');
+    } finally {
+      setCreatingMergeSummary(false);
+    }
+  }
+
+  async function createGlobalMergeSummary() {
+    if (!job) return;
+    const range = globalActionRange();
+    if (!range) return;
+    setCreatingMergeSummary(true);
+    try {
+      const item = await createSummaryMergeWorkItem(job.id, {
+        granularity: childInsightGranularity(),
+        start_time: range.start,
+        end_time: range.end,
+      });
+      setMergeItems((current) => [item, ...current.filter((candidate) => candidate.id !== item.id)]);
+      openUtilityOverlay('insights');
     } finally {
       setCreatingMergeSummary(false);
     }
@@ -974,6 +1187,14 @@ function JobDetailPage({
     }
   }
 
+  async function loadEvidenceMessages(ids: string[]) {
+    if (!job || ids.length === 0) return;
+    const data = await getJobMessagesByIDs(job.id, ids);
+    setRangeMessages({ ...data, source: 'evidence' });
+    setRangeMessagesPage(1);
+    openFloatOverlay('evidence', true);
+  }
+
   function zoomTimeline(direction: 'in' | 'out') {
     const nextIndex = direction === 'in' ? Math.min(zoomSteps.length - 1, zoomIndex + 1) : Math.max(0, zoomIndex - 1);
     const nextGranularity = zoomSteps[nextIndex];
@@ -996,52 +1217,162 @@ function JobDetailPage({
   }
 
   function drillIntoCurrentRange() {
-    const range = currentAnalysisRange();
-    if (!range) return;
+    const range = currentAnalysisRange() ?? globalActionRange();
+    if (!range) {
+      zoomTimeline('in');
+      return;
+    }
     setTimelineWindow(range);
     setSelectedRange(range);
     setGranularity('hour');
   }
 
+  function clearTimelineSelection() {
+    setSelectedRange(null);
+    setSelectedCluster(null);
+    setSelectedBucket(null);
+    setExpandedBranchID(null);
+    setSelectedInsightID(null);
+    setBranchPreview(null);
+    setDetailPanelOpen(false);
+  }
+
+  function openFloatOverlay(panel: 'scope' | 'bucket' | 'evidence', forceOpen = false) {
+    setOpenUtilityPanel(null);
+    setFullscreenUtilityPanel(null);
+    setDetailPanelOpen(false);
+    setOpenTimelinePanel((current) => (forceOpen || current !== panel ? panel : null));
+  }
+
+  function openUtilityOverlay(panel: TimelineUtilityPanel) {
+    setOpenTimelinePanel(null);
+    setFullscreenUtilityPanel(null);
+    setDetailPanelOpen(false);
+    setOpenUtilityPanel((current) => (current === panel ? null : panel));
+  }
+
+  function openFullscreenUtilityOverlay(panel: TimelineUtilityPanel) {
+    setOpenTimelinePanel(null);
+    setOpenUtilityPanel(null);
+    setDetailPanelOpen(false);
+    setFullscreenBranch(null);
+    setFullscreenUtilityPanel(panel);
+  }
+
+  async function openBranchFullscreen(branch: AnalysisBranch) {
+    setOpenTimelinePanel(null);
+    setOpenUtilityPanel(null);
+    setFullscreenUtilityPanel(null);
+    setDetailPanelOpen(false);
+    setFullscreenBranch(branch);
+    setLoadingFullscreenBranch(true);
+    try {
+      const fresh = await getBranch(branch.id);
+      setFullscreenBranch(fresh);
+      setBranches((current) => current.map((item) => (item.id === fresh.id ? fresh : item)));
+    } finally {
+      setLoadingFullscreenBranch(false);
+    }
+  }
+
+  function openDetailOverlay() {
+    setOpenTimelinePanel(null);
+    setOpenUtilityPanel(null);
+    setFullscreenUtilityPanel(null);
+    setFullscreenBranch(null);
+    setDetailPanelOpen(true);
+  }
+
+  function selectBranchForDetail(branch: AnalysisBranch) {
+    setSelectedRange({ start: branch.start_time, end: branch.end_time });
+    setSelectedCluster(null);
+    setSelectedInsightID(null);
+    setExpandedBranchID(branch.id);
+    const bucket = timeline.find((candidate) => rangesOverlap(candidate.start_time, candidate.end_time, branch.start_time, branch.end_time));
+    if (bucket) {
+      setSelectedBucket(bucket);
+    }
+    openDetailOverlay();
+  }
+
   const activeRange = currentAnalysisRange();
-  const selectedWorkItems = selectedRange
-    ? workItems.filter((item) => rangeContains(selectedRange.start, selectedRange.end, item.start_time, item.end_time))
-    : branchPreview
-    ? workItems.filter((item) => branchPreview.bucket_ids.includes(item.scope_id) || rangeContains(branchPreview.start_time, branchPreview.end_time, item.start_time, item.end_time))
-    : selectedCluster
-      ? workItems.filter((item) => selectedCluster.bucket_ids.includes(item.scope_id))
-      : selectedBucket
-        ? workItems.filter((item) => item.scope_id === selectedBucket.id)
-        : [];
-  const selectedSummaryItems = selectedRange
-    ? summaryItems.filter((item) => rangeContains(selectedRange.start, selectedRange.end, item.start_time, item.end_time))
-    : branchPreview
-    ? summaryItems.filter((item) => branchPreview.bucket_ids.includes(item.scope_id))
-    : selectedCluster
-      ? summaryItems.filter((item) => selectedCluster.bucket_ids.includes(item.scope_id))
-      : selectedBucket
-        ? summaryItems.filter((item) => item.scope_id === selectedBucket.id)
-        : [];
-  const selectedMergeItems = activeRange
+  const TimelineRenderer = timelineRenderer === 'canvas' ? CanvasTimelineRenderer : EChartsTimelineRenderer;
+  const insightRange = currentNodeRange();
+  const insightGranularity = childInsightGranularity();
+  const insightBucketIDs = childInsightBucketIDs();
+  const globalActionBucketIDs = new Set(globalActionBuckets.map((bucket) => bucket.id));
+  const globalSummaryItems = summaryItems.filter((item) => item.granularity === insightGranularity && (globalActionBucketIDs.has(item.scope_id) || (globalActionRange() ? rangeContains(globalActionRange()!.start, globalActionRange()!.end, item.start_time, item.end_time) : true)));
+  const globalSummaryCoverage = summaryCoverageStats(globalActionBucketIDs.size, globalSummaryItems);
+  const insightWorkItems = insightRange
+    ? workItems.filter((item) => item.granularity === insightGranularity && (insightBucketIDs.has(item.scope_id) || rangeContains(insightRange.start, insightRange.end, item.start_time, item.end_time)))
+    : [];
+  const selectedSummaryItems = insightRange
+    ? summaryItems.filter((item) => item.granularity === insightGranularity && (insightBucketIDs.has(item.scope_id) || rangeContains(insightRange.start, insightRange.end, item.start_time, item.end_time)))
+    : [];
+  const selectedMergeItems = insightRange
     ? mergeItems.filter(
         (item) =>
-          item.start_time === activeRange.start &&
-          item.end_time === activeRange.end &&
-          item.granularity === resolvedGranularity,
+          item.start_time === insightRange.start &&
+          item.end_time === insightRange.end &&
+          item.granularity === insightGranularity,
       )
     : [];
-  const summaryCoverage = summaryCoverageStats(branchPreview?.bucket_ids.length ?? 0, selectedSummaryItems);
-  const selectedWordCloudTitle = selectedRange ? '当前框选词云' : selectedCluster ? '当前簇词云' : '当前桶词云';
+  const summaryCoverage = summaryCoverageStats(insightBucketIDs.size, selectedSummaryItems);
+  const selectedWordCloudTitle = selectedRange ? '子周期词云' : selectedCluster ? '簇内子周期词云' : selectedBucket ? '桶内子周期词云' : '当前节点子周期词云';
   const activeScopeKind = selectedRange ? '框选范围' : selectedCluster ? '连续对话簇' : selectedBucket ? '单个时间桶' : '未选择';
   const activeScopeWindow = activeRange ? `${formatDate(activeRange.start)} - ${formatDate(activeRange.end)}` : '请选择时间轴上的点或范围';
+  const insightScopeWindow = insightRange ? `${formatDate(insightRange.start)} - ${formatDate(insightRange.end)}` : activeScopeWindow;
+  const searchScopeLabel = activeRange ? `${activeScopeKind} · ${activeScopeWindow}` : '全量消息';
   const selectedBranch = visibleBranches.find((branch) => branch.id === expandedBranchID) ?? null;
   const insightItems = [...summaryItems, ...mergeItems, ...workItems];
   const selectedInsight = insightItems.find((item) => item.id === selectedInsightID) ?? null;
+  const visibleTokenTotal = timeline.reduce((sum, bucket) => sum + (bucket.total_tokens || 0), 0);
+  const currentInsightTokenTotal = selectedMergeItems.reduce((sum, item) => sum + (item.total_tokens || 0), 0) + selectedSummaryItems.reduce((sum, item) => sum + (item.total_tokens || 0), 0);
+  const selectedTokenTotal = selectedBranch?.total_tokens || selectedInsight?.total_tokens || currentInsightTokenTotal || selectedBucket?.total_tokens || 0;
   const evidencePage = rangeMessages ?? (bucketMessages ? { ...bucketMessages, source: 'bucket' } : null);
   const evidenceRangeLabel = activeRange ? `${formatDate(activeRange.start)} - ${formatDate(activeRange.end)}` : selectedBucket ? formatBucketWindow(selectedBucket) : '未选中范围';
-  const utilityTitle = openUtilityPanel === 'tasks' ? '当前片段任务' : openUtilityPanel === 'messages' ? '桶内消息' : openUtilityPanel === 'search' ? '消息搜索' : openUtilityPanel === 'branches' ? '已保存 Branch' : activeScopeKind;
+  const timelineDetailSelection: TimelineDetailSelection | null = selectedBranch
+    ? { kind: 'branch', branch: selectedBranch }
+    : selectedInsight
+      ? { kind: 'insight', item: selectedInsight }
+      : selectedRange
+        ? {
+            kind: 'range',
+            range: selectedRange,
+            title: '框选范围',
+            messageCount: branchPreview?.message_count ?? selectedBucket?.message_count ?? 0,
+            bucketCount: branchPreview?.bucket_ids.length ?? insightBucketIDs.size,
+            coverageText: `${summaryCoverage.completed}/${summaryCoverage.expected}`,
+            wordCloudTaskCount: insightWorkItems.length,
+            tokenCount: selectedTokenTotal,
+            hint: branchPreview?.topic_hint || selectedBucket?.summary_title || selectedBucket?.preview || '当前框选范围还没有稳定摘要。',
+          }
+        : selectedCluster
+          ? {
+              kind: 'range',
+              range: { start: selectedCluster.start_time, end: selectedCluster.end_time },
+              title: '连续对话簇',
+              messageCount: selectedCluster.message_count,
+              bucketCount: selectedCluster.bucket_count,
+              coverageText: `${summaryCoverage.completed}/${summaryCoverage.expected}`,
+              wordCloudTaskCount: insightWorkItems.length,
+              tokenCount: selectedTokenTotal,
+              hint: selectedCluster.topic_hint || '连续对话簇',
+            }
+          : selectedBucket
+            ? {
+                kind: 'bucket',
+                bucket: selectedBucket,
+                coverageText: `${summaryCoverage.completed}/${summaryCoverage.expected}`,
+                wordCloudTaskCount: insightWorkItems.length,
+              }
+            : null;
+  const utilityTitle = openUtilityPanel === 'insights' ? '词云与摘要' : openUtilityPanel === 'tasks' ? '当前片段任务' : openUtilityPanel === 'messages' ? '桶内消息' : openUtilityPanel === 'search' ? '消息搜索' : openUtilityPanel === 'branches' ? '已保存 Branch' : activeScopeKind;
+  const fullscreenUtilityTitle = fullscreenUtilityPanel === 'insights' ? '词云与摘要' : fullscreenUtilityPanel === 'tasks' ? '当前片段任务' : fullscreenUtilityPanel === 'messages' ? '桶内消息' : fullscreenUtilityPanel === 'search' ? '消息搜索' : fullscreenUtilityPanel === 'branches' ? '已保存 Branch' : fullscreenUtilityPanel === 'status' ? '任务状态' : activeScopeKind;
   const utilitySubtitle =
-    openUtilityPanel === 'messages'
+    openUtilityPanel === 'status'
+      ? `${job.status} · ${progress}%`
+      : openUtilityPanel === 'messages'
       ? selectedBucket
         ? formatBucketWindow(selectedBucket)
         : '请选择一个时间桶'
@@ -1051,10 +1382,76 @@ function JobDetailPage({
           : '按当前片段或时间桶搜索'
         : openUtilityPanel === 'branches'
           ? `${visibleBranches.length} 个已保存片段`
+        : openUtilityPanel === 'insights'
+          ? `当前节点的 ${granularityText(insightGranularity)} 子周期 · ${summaryCoverage.completed}/${summaryCoverage.expected} 个摘要`
         : activeScopeWindow;
+  const activeUtilityPanel = fullscreenUtilityPanel ?? openUtilityPanel;
   const utilityPanel = (
     <>
-      {openUtilityPanel === 'scope' && (
+      {activeUtilityPanel === 'status' && (
+        <div className="utilityStack">
+          <InteractionFlow />
+          <div className="timelineStatusStrip drawerStatusStrip">
+            <div>
+              <span>任务状态</span>
+              <strong>{job.status}</strong>
+            </div>
+            <div>
+              <span>消息</span>
+              <strong>{job.message_count}</strong>
+            </div>
+            <div>
+              <span>LLM</span>
+              <strong>{job.llm_message_count}</strong>
+            </div>
+            <div>
+              <span>Tokens</span>
+              <strong>{job.total_tokens}</strong>
+            </div>
+          </div>
+          <div className="progressBar jobProgress">
+            <span style={{ width: `${progress}%` }} />
+          </div>
+          <div className="progressText">{progress}% · {job.stage}</div>
+          {job.result && (
+            <button className="primary full" onClick={() => onOpenReport(job.result!)}>
+              <FileText size={16} /> 查看报告
+            </button>
+          )}
+          <div className="eventLog dense">
+            {job.events.slice(-12).map((event) => (
+              <div key={`${event.time}-${event.message}`}>
+                <span>{formatDate(event.time)}</span>
+                <strong>{event.message}</strong>
+              </div>
+            ))}
+          </div>
+          {job.error && <div className="error">{job.error}</div>}
+        </div>
+      )}
+      {activeUtilityPanel === 'insights' && (
+        <div className="utilityStack">
+          <InsightWorkflowPanel
+            scopeWindow={insightScopeWindow}
+            childGranularity={granularityText(insightGranularity)}
+            coverage={summaryCoverage}
+            summaryCount={selectedSummaryItems.length}
+            mergeCount={selectedMergeItems.length}
+            wordCloudCount={insightWorkItems.length}
+            wordCloudItems={insightWorkItems}
+            seedingSummaries={seedingSummaries}
+            creatingMergeSummary={creatingMergeSummary}
+            seedingWorkItems={seedingWorkItems}
+            onSeedSummaries={() => void seedTopicSummaries()}
+            onMerge={() => void createCurrentMergeSummary()}
+            onSeedWordClouds={() => void seedWordClouds()}
+          />
+          <WordCloudPanel title={selectedWordCloudTitle} items={insightWorkItems} onPrioritize={(item) => void prioritizeSelectedWorkItem(item)} />
+          <MergeSummaryPanel items={selectedMergeItems} onPrioritize={(item) => void prioritizeSelectedWorkItem(item)} coverage={summaryCoverage} />
+          <TopicSummaryPanel items={selectedSummaryItems} coverage={summaryCoverage} onPrioritize={(item) => void prioritizeSelectedWorkItem(item)} />
+        </div>
+      )}
+      {activeUtilityPanel === 'scope' && (
         <div className="utilityStack">
           <div className="floatMetricGrid">
             <div>
@@ -1071,12 +1468,12 @@ function JobDetailPage({
             </div>
             <div>
               <span>词云任务</span>
-              <strong>{selectedWorkItems.length}</strong>
+              <strong>{insightWorkItems.length}</strong>
             </div>
           </div>
           <div className="scopeNotice">
             <strong>操作对象</strong>
-            <span>{selectedRange ? '当前框选的完整时间范围' : selectedCluster ? '当前连续对话簇' : selectedBucket ? '当前选中时间桶' : '未选择'}</span>
+            <span>{selectedRange ? '当前框选节点' : selectedCluster ? '当前连续对话簇节点' : selectedBucket ? '当前时间桶节点' : '未选择'}</span>
           </div>
           <label>
             Branch 标题
@@ -1088,7 +1485,7 @@ function JobDetailPage({
           </button>
         </div>
       )}
-      {openUtilityPanel === 'tasks' && (
+      {activeUtilityPanel === 'tasks' && (
         <div className="utilityStack">
           <WorkItemOverview
             title="当前片段任务"
@@ -1107,12 +1504,12 @@ function JobDetailPage({
           >
             {creatingMergeSummary ? <Loader2 className="spin" size={16} /> : <FileText size={16} />} 聚合完整周期摘要
           </button>
-          <MergeSummaryPanel items={selectedMergeItems} onPrioritize={(item) => void prioritizeSelectedWorkItem(item)} />
-          <TopicSummaryPanel items={selectedSummaryItems} onPrioritize={(item) => void prioritizeSelectedWorkItem(item)} />
-          <WordCloudPanel title={selectedWordCloudTitle} items={selectedWorkItems} onPrioritize={(item) => void prioritizeSelectedWorkItem(item)} />
+          <MergeSummaryPanel items={selectedMergeItems} onPrioritize={(item) => void prioritizeSelectedWorkItem(item)} coverage={summaryCoverage} />
+          <TopicSummaryPanel items={selectedSummaryItems} coverage={summaryCoverage} onPrioritize={(item) => void prioritizeSelectedWorkItem(item)} />
+          <WordCloudPanel title={selectedWordCloudTitle} items={insightWorkItems} onPrioritize={(item) => void prioritizeSelectedWorkItem(item)} />
         </div>
       )}
-      {openUtilityPanel === 'messages' && (
+      {activeUtilityPanel === 'messages' && (
         <div className="utilityStack">
           <div className="previewHeader">
             <h2>桶内消息</h2>
@@ -1141,8 +1538,26 @@ function JobDetailPage({
           </div>
         </div>
       )}
-      {openUtilityPanel === 'search' && (
+      {activeUtilityPanel === 'search' && (
         <div className="utilityStack">
+          <div className="scopeNotice searchScopeNotice">
+            <strong>搜索范围</strong>
+            <span>{searchScopeLabel}</span>
+            {activeRange && (
+              <button
+                className="secondary"
+                onClick={() => {
+                  setSelectedRange(null);
+                  setSelectedCluster(null);
+                  setSelectedBucket(null);
+                  setBranchPreview(null);
+                  setMessageSearchResults(null);
+                }}
+              >
+                解除限定
+              </button>
+            )}
+          </div>
           <div className="searchInline">
             <input
               value={messageSearchQuery}
@@ -1181,7 +1596,7 @@ function JobDetailPage({
           )}
         </div>
       )}
-      {openUtilityPanel === 'branches' && (
+      {activeUtilityPanel === 'branches' && (
         <div className="recordList utilityBranchList">
           {visibleBranches.map((branch) => {
             const expanded = expandedBranchID === branch.id;
@@ -1210,7 +1625,20 @@ function JobDetailPage({
                   <button className="secondary" disabled={runningBranchID === branch.id || branch.status === 'running' || branch.message_count <= 0} onClick={() => void runBranch(branch)}>
                     {runningBranchID === branch.id ? <Loader2 className="spin" size={16} /> : <Activity size={16} />} 运行分析
                   </button>
-                  <button className="secondary" onClick={() => setExpandedBranchID(expanded ? null : branch.id)}>
+                  <button className="secondary" onClick={() => void openBranchFullscreen(branch)}>
+                    全文
+                  </button>
+                  <button
+                    className="secondary"
+                    onClick={() => {
+                      if (expanded) {
+                        setExpandedBranchID(null);
+                        setDetailPanelOpen(false);
+                        return;
+                      }
+                      selectBranchForDetail(branch);
+                    }}
+                  >
                     {expanded ? '关闭面板' : '打开面板'}
                   </button>
                   <span className="branchStage">{branch.message_count <= 0 ? '当前片段没有可分析消息' : branch.stage || '等待分析'}</span>
@@ -1226,124 +1654,122 @@ function JobDetailPage({
   );
 
   return (
-    <section className="page">
-      <PageTitle icon={<Activity size={22} />} title="任务时间轴" subtitle={`${job.relationship_id} · ${job.file_name}`} />
-      <div className="jobLayout">
-        <aside className="panel jobSidebar">
-          <button className="secondary full" onClick={onBack}>
+    <section className="page timelinePage">
+      <div className={`timelineShell ${openUtilityPanel ? 'drawerOpen' : ''} ${openTimelinePanel ? 'floatOpen' : ''}`}>
+        <div className="timelineTopBar">
+          <button className="secondary" onClick={onBack}>
             <ChevronLeft size={16} /> 返回历史
           </button>
-          <div className="metricGrid">
-            <div className="metric">
-              <span>任务状态</span>
+          <div className="timelineTitleBlock">
+            <span>任务时间轴</span>
+            <strong>{job.relationship_id}</strong>
+            <p>{job.file_name}</p>
+          </div>
+          <div className="timelineStatusStrip">
+            <div>
+              <span>状态</span>
               <strong>{job.status}</strong>
             </div>
-            <div className="metric">
-              <span>当前阶段</span>
+            <div>
+              <span>阶段</span>
               <strong>{job.stage}</strong>
             </div>
-            <div className="metric">
-              <span>可处理消息</span>
+            <div>
+              <span>消息</span>
               <strong>{job.message_count}</strong>
             </div>
-            <div className="metric">
-              <span>送入 LLM</span>
-              <strong>{job.llm_message_count}</strong>
-            </div>
-            <div className="metric">
-              <span>Prompt Tokens</span>
-              <strong>{job.prompt_tokens}</strong>
-            </div>
-            <div className="metric">
-              <span>Total Tokens</span>
+            <div>
+              <span>Tokens</span>
               <strong>{job.total_tokens}</strong>
             </div>
           </div>
-          <div className="progressBar jobProgress">
-            <span style={{ width: `${progress}%` }} />
-          </div>
-          <div className="progressText">{progress}%</div>
-          {job.result && (
-            <button className="primary full" onClick={() => onOpenReport(job.result!)}>
-              <FileText size={16} /> 查看报告
-            </button>
-          )}
-          <div className="eventLog dense">
-            {job.events.slice(-12).map((event) => (
-              <div key={`${event.time}-${event.message}`}>
-                <span>{formatDate(event.time)}</span>
-                <strong>{event.message}</strong>
-              </div>
-            ))}
-          </div>
-          {job.error && <div className="error">{job.error}</div>}
-        </aside>
-
-        <div className="jobMain">
-          <div className="panel timelinePanel">
-            <InteractionFlow />
-            <TimelineHeaderControls
-              timelineWindowLabel={timelineWindow ? `局部 ${formatDate(timelineWindow.start)} - ${formatDate(timelineWindow.end)}` : '全局概览'}
-              granularity={granularity}
-              resolvedGranularity={resolvedGranularity}
-              visibleGranularities={visibleGranularities}
-              canUseFineGranularity={canUseFineGranularity}
-              zoomIndex={zoomIndex}
-              zoomStepsLength={zoomSteps.length}
-              hasTimelineWindow={Boolean(timelineWindow)}
-              seedingWorkItems={seedingWorkItems}
-              timelineLength={timeline.length}
-              onGranularityChange={setGranularity}
-              onZoom={zoomTimeline}
-              onResetTimelineWindow={resetTimelineWindow}
-              onSeedWordClouds={() => void seedWordClouds()}
-            />
-            <div className="timelineMeta">
-              <div className="timelineMetaPrimary">
-                <strong>{timeline.length}</strong>
-                <span>时间桶</span>
-                <strong>{timelineStats.completed}</strong>
-                <span>已完成</span>
-                <strong>{timelineStats.running + timelineStats.queued}</strong>
-                <span>处理中/排队</span>
-                <strong>{timelineStats.failed}</strong>
-                <span>失败</span>
-              </div>
-              <div className="timelineLegend">
-                {(['completed', 'running', 'queued', 'failed', 'unseen'] as const).map((status) => (
-                  <span key={status}>
-                    <i style={{ background: bucketStatusColor(status, false) }} />
-                    {statusText(status)}
-                  </span>
-                ))}
-              </div>
-              {selectedRange && (
-                <div className="timelineSelection">
-                  已选区间 {formatDate(selectedRange.start)} - {formatDate(selectedRange.end)}
-                </div>
-              )}
-            </div>
+        </div>
+        <div className="timelineMain">
+          <div className="timelinePanel">
             {loadingTimeline ? (
               <div className="timelineChartLoading">
                 <Loader2 className="spin" size={16} /> 正在加载时间桶
               </div>
             ) : (
               <div className="timelineStage">
-                <TimelineActionDock
-                  hasActiveRange={Boolean(activeRange)}
-                  seedingSummaries={seedingSummaries}
-                  creatingMergeSummary={creatingMergeSummary}
-                  summaryReady={summaryCoverage.ready}
-                  creatingBranch={creatingBranch}
-                  hasBranchPreview={Boolean(branchPreview)}
-                  onDrill={drillIntoCurrentRange}
-                  onSeedSummaries={() => void seedTopicSummaries()}
-                  onCreateMergeSummary={() => void createCurrentMergeSummary()}
-                  onSaveBranch={saveBranch}
-                />
+                <div className="timelineGlassPanel timelineMetaFloat">
+                  <div className="timelineMetaPrimary">
+                    <span><strong>{timeline.length}</strong> 时间桶</span>
+                    <span><strong>{timelineStats.completed}</strong> 已完成</span>
+                    <span><strong>{timelineStats.running + timelineStats.queued}</strong> 处理中</span>
+                    <span><strong>{timelineStats.failed}</strong> 失败</span>
+                  </div>
+                  <div className="timelineTokenStrip">
+                    <span>
+                      <strong>{visibleTokenTotal}</strong>
+                      可见 Tokens
+                    </span>
+                    <span>
+                      <strong>{selectedTokenTotal}</strong>
+                      当前 Tokens
+                    </span>
+                  </div>
+                  <div className="timelineLegend">
+                    {(['completed', 'running', 'queued', 'failed', 'unseen'] as const).map((status) => (
+                      <span key={status}>
+                        <i style={{ background: bucketStatusColor(status, false) }} />
+                        {statusText(status)}
+                      </span>
+                    ))}
+                  </div>
+                  {selectedRange && (
+                    <div className="timelineSelection">
+                      已选区间 {formatDate(selectedRange.start)} - {formatDate(selectedRange.end)}
+                    </div>
+                  )}
+                </div>
+                <div className="timelineControlDock">
+                  <TimelineHeaderControls
+                    timelineWindowLabel={timelineWindow ? `局部 ${formatDate(timelineWindow.start)} - ${formatDate(timelineWindow.end)}` : '全局概览'}
+                    granularity={granularity}
+                    resolvedGranularity={resolvedGranularity}
+                    hasTimelineWindow={Boolean(timelineWindow)}
+                    onResetTimelineWindow={resetTimelineWindow}
+                  />
+                  <TimelineActionDock
+                    seedingSummaries={seedingSummaries}
+                    creatingMergeSummary={creatingMergeSummary}
+                    summaryReady={globalSummaryCoverage.ready}
+                    summaryMissing={globalSummaryCoverage.missing}
+                    creatingBranch={creatingBranch}
+                    hasBranchPreview={Boolean(branchPreview)}
+                    granularity={granularity}
+                    visibleGranularities={visibleGranularities}
+                    canUseFineGranularity={canUseFineGranularity}
+                    zoomIndex={zoomIndex}
+                    zoomStepsLength={zoomSteps.length}
+                    seedingWorkItems={seedingWorkItems}
+                    timelineLength={timeline.length}
+                    onGranularityChange={setGranularity}
+                    onZoom={zoomTimeline}
+                    onSeedWordClouds={() => void seedGlobalWordClouds()}
+                    onDrill={drillIntoCurrentRange}
+                    onSeedSummaries={() => void seedGlobalTopicSummaries()}
+                    onCreateMergeSummary={() => void createGlobalMergeSummary()}
+                    onSaveBranch={saveBranch}
+                  />
+                  <div className="rendererSwitch" aria-label="时间线渲染器">
+                    <button className={timelineRenderer === 'echarts' ? 'active' : ''} onClick={() => setTimelineRenderer('echarts')}>
+                      ECharts
+                    </button>
+                    <button className={timelineRenderer === 'canvas' ? 'active' : ''} onClick={() => setTimelineRenderer('canvas')}>
+                      Canvas
+                    </button>
+                  </div>
+                </div>
+                {timelineDetailSelection && !detailPanelOpen && (
+                  <button className="timelineDetailReopen" onClick={openDetailOverlay}>
+                    打开当前详情
+                  </button>
+                )}
                 <TimelineFloatPanels
                   openPanel={openTimelinePanel}
-                  onTogglePanel={(panel) => setOpenTimelinePanel((current) => (current === panel ? null : panel))}
+                  onTogglePanel={openFloatOverlay}
                   onClose={() => setOpenTimelinePanel(null)}
                   activeScopeKind={activeScopeKind}
                   activeScopeWindow={activeScopeWindow}
@@ -1351,7 +1777,7 @@ function JobDetailPage({
                   messageCount={branchPreview?.message_count ?? selectedBucket?.message_count ?? 0}
                   bucketCount={branchPreview?.bucket_ids.length ?? (selectedBucket ? 1 : 0)}
                   summaryCoverageText={`${summaryCoverage.completed}/${summaryCoverage.expected}`}
-                  wordCloudTaskCount={selectedWorkItems.length}
+                  wordCloudTaskCount={insightWorkItems.length}
                   selectedBucket={selectedBucket}
                   evidencePage={evidencePage}
                   evidenceRangeLabel={evidenceRangeLabel}
@@ -1363,12 +1789,13 @@ function JobDetailPage({
                   activePanel={openUtilityPanel}
                   title={utilityTitle}
                   subtitle={utilitySubtitle}
-                  onPanelChange={(panel) => setOpenUtilityPanel((current) => (current === panel ? null : panel))}
+                  onPanelChange={openUtilityOverlay}
                   onClose={() => setOpenUtilityPanel(null)}
+                  onExpand={openFullscreenUtilityOverlay}
                 >
                   {utilityPanel}
                 </TimelineUtilityDrawer>
-                <EChartsTimelineRenderer
+                <TimelineRenderer
                   buckets={timeline}
                   granularity={resolvedGranularity}
                   selectedBucketID={selectedBucket?.id ?? ''}
@@ -1383,68 +1810,88 @@ function JobDetailPage({
                     setSelectedBucket(bucket);
                     setSelectedRange(null);
                     setSelectedCluster(null);
+                    setExpandedBranchID(null);
+                    setSelectedInsightID(null);
+                    openDetailOverlay();
                   }}
                   onSelectRange={(start, end, firstBucket) => {
                     setSelectedRange({ start, end });
                     setSelectedBucket(firstBucket);
                     setSelectedCluster(null);
-                  }}
-                  onSelectBranch={(branch) => {
-                    setSelectedRange({ start: branch.start_time, end: branch.end_time });
-                    setSelectedCluster(null);
-                    setExpandedBranchID(branch.id);
+                    setExpandedBranchID(null);
                     setSelectedInsightID(null);
-                    const bucket = timeline.find((candidate) => rangesOverlap(candidate.start_time, candidate.end_time, branch.start_time, branch.end_time));
-                    if (bucket) {
-                      setSelectedBucket(bucket);
-                    }
+                    openDetailOverlay();
                   }}
+                  onSelectBranch={selectBranchForDetail}
                   onSelectInsight={(item) => {
                     setSelectedInsightID(item.id);
                     setExpandedBranchID(null);
                     setSelectedRange({ start: item.start_time, end: item.end_time });
                     setSelectedCluster(null);
+                    openDetailOverlay();
                     const bucket = timeline.find((candidate) => candidate.id === item.scope_id) ?? timeline.find((candidate) => rangesOverlap(candidate.start_time, candidate.end_time, item.start_time, item.end_time));
                     if (bucket) {
                       setSelectedBucket(bucket);
                     }
                   }}
                 />
-                {(selectedBranch || selectedInsight) && (
+                {timelineDetailSelection && detailPanelOpen && (
                   <div className="timelineStageInspector">
-                    {selectedBranch ? (
-                      <BranchInspector
-                        branch={selectedBranch}
-                        runningBranchID={runningBranchID}
-                        onRun={(branch) => void runBranch(branch)}
-                        onClose={() => setExpandedBranchID(null)}
-                      />
-                    ) : (
-                      <InsightInspector
-                        item={selectedInsight}
-                        onPrioritize={(item) => void prioritizeSelectedWorkItem(item)}
-                        onClose={() => setSelectedInsightID(null)}
-                      />
-                    )}
+                    <TimelineDetailPanel
+                      selection={timelineDetailSelection}
+                      runningBranchID={runningBranchID}
+                      onRunBranch={(branch) => void runBranch(branch)}
+                      onPrioritize={(item) => void prioritizeSelectedWorkItem(item)}
+                      onEvidence={(ids) => void loadEvidenceMessages(ids)}
+                      onExpandBranch={(branch) => void openBranchFullscreen(branch)}
+                      onClose={() => {
+                        clearTimelineSelection();
+                      }}
+                    />
                   </div>
                 )}
-                <div className="timelineSummaryOverlay">
-                  <TimelineSummaryRail
-                    summaries={summaryItems}
-                    merges={mergeItems}
-                    selectedRange={activeRange}
-                    onSelect={(item) => {
-                      setSelectedRange({ start: item.start_time, end: item.end_time });
-                      setSelectedCluster(null);
-                      setSelectedInsightID(item.id);
-                      setExpandedBranchID(null);
-                      const bucket = timeline.find((candidate) => candidate.id === item.scope_id) ?? timeline.find((candidate) => rangesOverlap(candidate.start_time, candidate.end_time, item.start_time, item.end_time));
-                      if (bucket) {
-                        setSelectedBucket(bucket);
-                      }
-                    }}
-                  />
+              </div>
+            )}
+            {fullscreenUtilityPanel && (
+              <div className="timelineFullscreenPanel">
+                <div className="timelineUtilityHeader">
+                  <div>
+                    <span>全屏</span>
+                    <strong>{fullscreenUtilityTitle}</strong>
+                    <p>{activeScopeWindow}</p>
+                  </div>
+                  <button className="secondary iconOnly" onClick={() => setFullscreenUtilityPanel(null)} title="关闭全屏面板">
+                    <X size={16} />
+                  </button>
                 </div>
+                <div className="timelineUtilityBody fullBody">{utilityPanel}</div>
+              </div>
+            )}
+            {fullscreenBranch && (
+              <div className="timelineFullscreenPanel branchFullscreenPanel">
+                <div className="timelineUtilityHeader">
+                  <div>
+                    <span>Branch 全文</span>
+                    <strong>{fullscreenBranch.title || fullscreenBranch.topic_hint || fullscreenBranch.id}</strong>
+                    <p>{formatDate(fullscreenBranch.start_time)} - {formatDate(fullscreenBranch.end_time)} · {fullscreenBranch.total_tokens} tokens</p>
+                  </div>
+                  <button className="secondary iconOnly" onClick={() => setFullscreenBranch(null)} title="关闭 Branch 全文">
+                    <X size={16} />
+                  </button>
+                </div>
+                <article className="timelineUtilityBody fullBody markdownBody branchFullscreenBody">
+                  {loadingFullscreenBranch ? (
+                    <div className="empty">
+                      <Loader2 className="spin" size={16} /> 正在加载 Branch 全文
+                    </div>
+                  ) : fullscreenBranch.report_markdown ? (
+                    <Suspense fallback={<div className="empty">正在渲染结果</div>}>
+                      <MarkdownRenderer>{fullscreenBranch.report_markdown}</MarkdownRenderer>
+                    </Suspense>
+                  ) : (
+                    <pre className="branchPlainReport">{fullscreenBranch.error || '暂无报告内容。请先运行 Branch 分析，或等待运行完成后重新打开。'}</pre>
+                  )}
+                </article>
               </div>
             )}
             {clusters.length > 0 && (
@@ -1546,14 +1993,7 @@ function WordCloudPanel({
         </span>
       </div>
       {terms.length > 0 ? (
-        <div className="wordCloudTerms">
-          {terms.slice(0, 18).map((term) => (
-            <span key={term.term} style={{ fontSize: `${Math.min(1.35, 0.82 + term.count * 0.08)}rem` }}>
-              {term.term}
-              <small>{term.count}</small>
-            </span>
-          ))}
-        </div>
+        <WordCloudCanvas terms={terms} limit={28} />
       ) : status === 'queued' || status === 'running' ? (
         <p>{status === 'running' ? '正在处理当前选择。' : '已排队，等待后台 worker 处理。'}</p>
       ) : (
@@ -1568,10 +2008,102 @@ function WordCloudPanel({
   );
 }
 
-function TopicSummaryPanel({ items, onPrioritize }: { items: AnalysisWorkItem[]; onPrioritize: (item: AnalysisWorkItem) => void }) {
+function InsightWorkflowPanel({
+  scopeWindow,
+  childGranularity,
+  coverage,
+  summaryCount,
+  mergeCount,
+  wordCloudCount,
+  wordCloudItems,
+  seedingSummaries,
+  creatingMergeSummary,
+  seedingWorkItems,
+  onSeedSummaries,
+  onMerge,
+  onSeedWordClouds,
+}: {
+  scopeWindow: string;
+  childGranularity: string;
+  coverage: ReturnType<typeof summaryCoverageStats>;
+  summaryCount: number;
+  mergeCount: number;
+  wordCloudCount: number;
+  wordCloudItems: AnalysisWorkItem[];
+  seedingSummaries: boolean;
+  creatingMergeSummary: boolean;
+  seedingWorkItems: boolean;
+  onSeedSummaries: () => void;
+  onMerge: () => void;
+  onSeedWordClouds: () => void;
+}) {
+  const terms = mergeWordCloudTerms(wordCloudItems);
+  const wordCloudStatus = wordCloudItems.some((item) => item.status === 'running')
+    ? 'running'
+    : wordCloudItems.some((item) => item.status === 'queued')
+      ? 'queued'
+      : wordCloudItems.some((item) => item.status === 'failed')
+        ? 'failed'
+        : terms.length > 0
+          ? 'completed'
+          : 'unseen';
+  return (
+    <div className="insightWorkflow">
+      <div className="wordCloudHeader">
+        <strong>当前节点的子周期洞察</strong>
+        <span className={`workStatus ${coverage.ready ? 'completed' : coverage.completed > 0 ? 'running' : 'unseen'}`}>
+          {coverage.completed}/{coverage.expected}
+        </span>
+      </div>
+      <p>{scopeWindow} · 子周期粒度：{childGranularity}</p>
+      <div className="inlineWordCloud">
+        <div className="wordCloudHeader">
+          <strong>词云结果</strong>
+          <span className={`workStatus ${wordCloudStatus}`}>{statusText(wordCloudStatus)}</span>
+        </div>
+        {terms.length > 0 ? (
+          <WordCloudCanvas terms={terms} limit={18} compact />
+        ) : (
+          <p>{wordCloudStatus === 'running' ? '正在生成词云。' : wordCloudStatus === 'queued' ? '词云任务已排队。' : '还没有词云结果。点击“生成词云”。'}</p>
+        )}
+      </div>
+      <div className="workOverviewGrid">
+        <div>
+          <span>桶摘要</span>
+          <strong>{summaryCount}</strong>
+        </div>
+        <div>
+          <span>聚合摘要</span>
+          <strong>{mergeCount}</strong>
+        </div>
+        <div>
+          <span>词云任务</span>
+          <strong>{wordCloudCount}</strong>
+        </div>
+        <div>
+          <span>可聚合</span>
+          <strong>{coverage.ready ? '是' : '否'}</strong>
+        </div>
+      </div>
+      <div className="insightWorkflowActions">
+        <button className="secondary" disabled={seedingSummaries || coverage.expected === 0} onClick={onSeedSummaries}>
+          {seedingSummaries ? <Loader2 className="spin" size={16} /> : <FileText size={16} />} {coverage.missing > 0 ? `补齐桶摘要 (${coverage.missing})` : '刷新桶摘要'}
+        </button>
+        <button className="primary" disabled={creatingMergeSummary || !coverage.ready} onClick={onMerge}>
+          {creatingMergeSummary ? <Loader2 className="spin" size={16} /> : <FileText size={16} />} 聚合当前节点
+        </button>
+        <button className="secondary" disabled={seedingWorkItems || coverage.expected === 0} onClick={onSeedWordClouds}>
+          {seedingWorkItems ? <Loader2 className="spin" size={16} /> : <Search size={16} />} 生成词云
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TopicSummaryPanel({ items, coverage, onPrioritize }: { items: AnalysisWorkItem[]; coverage: ReturnType<typeof summaryCoverageStats>; onPrioritize: (item: AnalysisWorkItem) => void }) {
   const [expanded, setExpanded] = useState(false);
   if (items.length === 0) {
-    return <div className="wordCloudPanel mutedPanel">当前选择还没有摘要任务。点击“生成片段摘要”后，会按当前粒度逐个 bucket 生成。</div>;
+    return <div className="wordCloudPanel mutedPanel">当前节点还没有子周期摘要。先补齐子周期摘要，再聚合当前节点。</div>;
   }
   const completed = items.filter((item) => item.status === 'completed');
   const runningCount = items.filter((item) => item.status === 'running').length;
@@ -1583,9 +2115,9 @@ function TopicSummaryPanel({ items, onPrioritize }: { items: AnalysisWorkItem[];
   return (
     <div className="summaryPanel">
       <div className="wordCloudHeader">
-        <strong>片段摘要</strong>
+        <strong>子周期摘要</strong>
         <span className={`workStatus ${status}`}>
-          {status} · {completed.length}/{items.length}
+          {coverage.completed}/{coverage.expected} · {status}
         </span>
       </div>
       {completed.length > 0 ? (
@@ -1627,16 +2159,16 @@ function TopicSummaryPanel({ items, onPrioritize }: { items: AnalysisWorkItem[];
   );
 }
 
-function MergeSummaryPanel({ items, onPrioritize }: { items: AnalysisWorkItem[]; onPrioritize: (item: AnalysisWorkItem) => void }) {
+function MergeSummaryPanel({ items, coverage, onPrioritize }: { items: AnalysisWorkItem[]; coverage?: ReturnType<typeof summaryCoverageStats>; onPrioritize: (item: AnalysisWorkItem) => void }) {
   if (items.length === 0) {
-    return <div className="wordCloudPanel mutedPanel">还没有合并摘要。先生成部分 bucket 摘要，再点击“聚合已完成摘要”。</div>;
+    return <div className="wordCloudPanel mutedPanel">{coverage?.ready ? '子周期摘要已齐，可以聚合当前节点。' : '还没有当前节点聚合摘要。先补齐这个节点里的所有子周期摘要。'}</div>;
   }
   const item = [...items].sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))[0];
   const summary = topicSummaryResult(item);
   return (
     <div className="summaryPanel mergeSummaryPanel">
       <div className="wordCloudHeader">
-        <strong>合并摘要</strong>
+        <strong>当前节点聚合摘要</strong>
         <span className={`workStatus ${item.status}`}>{statusText(item.status)}</span>
       </div>
       {item.status === 'completed' && summary ? (
@@ -1827,6 +2359,7 @@ function InteractionFlow() {
 function formatDate(value: string) {
   if (!value || value.startsWith('0001-')) return '未知时间';
   return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -1858,10 +2391,10 @@ function formatBucketRange(bucket: TimelineBucket) {
       break;
     case 'week':
     case 'day':
-      options = { month: '2-digit', day: '2-digit' };
+      options = { year: 'numeric', month: '2-digit', day: '2-digit' };
       break;
     default:
-      options = { hour: '2-digit', minute: '2-digit' };
+      options = { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' };
   }
   return new Intl.DateTimeFormat('zh-CN', options).format(start);
 }
@@ -1987,6 +2520,22 @@ function bucketAnalysisStats(buckets: TimelineBucket[]) {
   return stats;
 }
 
+function timelineDataSignature(granularity: TimelineGranularity, buckets: TimelineBucket[], clusters: TimelineCluster[]) {
+  return JSON.stringify({
+    granularity,
+    buckets: buckets.map((bucket) => [
+      bucket.id,
+      bucket.message_count,
+      bucket.analysis_status || '',
+      bucket.summary_status || '',
+      bucket.word_cloud_status || '',
+      bucket.summary_title || '',
+      bucket.total_tokens || 0,
+    ]),
+    clusters: clusters.map((cluster) => [cluster.id, cluster.message_count, cluster.bucket_count, cluster.status, cluster.topic_hint]),
+  });
+}
+
 function BucketStatusStrip({ bucket }: { bucket: TimelineBucket }) {
   const entries = [
     ['摘要', bucket.summary_status || 'unseen'],
@@ -2027,6 +2576,21 @@ function mergeWorkItems(current: AnalysisWorkItem[], incoming: AnalysisWorkItem[
   return Array.from(byID.values()).sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime());
 }
 
+function workItemStatusSignature(...groups: AnalysisWorkItem[][]) {
+  return groups
+    .flat()
+    .map((item) => `${item.id}:${item.status}:${item.progress}:${item.updated_at}`)
+    .sort()
+    .join('|');
+}
+
+function historyJobsStatusSignature(jobs: AnalysisJob[]) {
+  return jobs
+    .map((job) => `${job.id}:${job.status}:${job.progress}:${job.updated_at}`)
+    .sort()
+    .join('|');
+}
+
 function branchSummary(branch: AnalysisBranch) {
   const markdownSummary = firstMarkdownParagraph(branch.report_markdown ?? '');
   if (markdownSummary) {
@@ -2062,6 +2626,55 @@ function mergeWordCloudTerms(items: AnalysisWorkItem[]) {
     .sort((a, b) => (a.count === b.count ? a.term.localeCompare(b.term) : b.count - a.count));
 }
 
+function WordCloudCanvas({
+  terms,
+  limit = 24,
+  compact = false,
+}: {
+  terms: Array<{ term: string; count: number }>;
+  limit?: number;
+  compact?: boolean;
+}) {
+  const visibleTerms = terms.slice(0, limit);
+  const maxCount = Math.max(...visibleTerms.map((term) => term.count), 1);
+  const minCount = Math.min(...visibleTerms.map((term) => term.count), maxCount);
+  return (
+    <div className={`wordCloudCanvas${compact ? ' compact' : ''}`} aria-label="词云结果">
+      {visibleTerms.map((term, index) => {
+        const weight = maxCount === minCount ? 0.65 : (term.count - minCount) / (maxCount - minCount);
+        const angle = (index * 137.5 * Math.PI) / 180;
+        const radius = Math.sqrt((index + 1) / Math.max(visibleTerms.length, 1));
+        const x = 50 + Math.cos(angle) * radius * (compact ? 36 : 41);
+        const y = 50 + Math.sin(angle) * radius * (compact ? 30 : 34);
+        const fontSize = compact ? 0.72 + weight * 0.68 : 0.78 + weight * 0.92;
+        const opacity = 0.58 + weight * 0.38;
+        return (
+          <span
+            key={term.term}
+            className="wordCloudBubble"
+            style={
+              {
+                left: `${clamp(x, 10, 90)}%`,
+                top: `${clamp(y, 12, 88)}%`,
+                fontSize: `${fontSize}rem`,
+                opacity,
+                '--word-weight': weight,
+              } as CSSProperties
+            }
+            title={`${term.term} · ${term.count}`}
+          >
+            {term.term}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
 function topicSummaryResult(item: AnalysisWorkItem) {
   if (!item.result || Array.isArray(item.result)) {
     return null;
@@ -2074,6 +2687,25 @@ function topicSummaryResult(item: AnalysisWorkItem) {
 
 function isFineGranularity(value: TimelineGranularity) {
   return value === 'hour' || value === '15m' || value === '5m';
+}
+
+function granularityText(value: TimelineGranularity) {
+  switch (value) {
+    case 'year':
+      return '年';
+    case 'month':
+      return '月';
+    case 'week':
+      return '周';
+    case 'day':
+      return '天';
+    case '15m':
+      return '15 分钟';
+    case '5m':
+      return '5 分钟';
+    default:
+      return '小时';
+  }
 }
 
 async function loadAdaptiveTimeline(jobID: string, granularity: 'auto' | TimelineGranularity, range: TimelineRange | null) {
@@ -2100,12 +2732,16 @@ async function loadAdaptiveTimeline(jobID: string, granularity: 'auto' | Timelin
 
 function readRouteFromHash(): RouteState {
   const raw = window.location.hash.replace(/^#/, '') || '/analysis';
-  const path = raw.startsWith('/') ? raw : `/${raw}`;
+  const [rawPath, rawQuery = ''] = raw.split('?');
+  const path = rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
+  const params = new URLSearchParams(rawQuery);
   if (path === '/history') return { view: 'history' };
   if (path === '/account') return { view: 'account' };
   if (path.startsWith('/job/')) {
     const jobID = decodeURIComponent(path.slice('/job/'.length));
-    return jobID ? { view: 'job', jobID } : { view: 'history' };
+    const range = parseHashRange(params.get('range'));
+    const entity = params.get('entity') || undefined;
+    return jobID ? { view: 'job', jobID, range, entity } : { view: 'history' };
   }
   if (path.startsWith('/report/')) {
     const reportID = decodeURIComponent(path.slice('/report/'.length));
@@ -2121,10 +2757,30 @@ function routeToHash(route: RouteState): string {
     case 'account':
       return '#/account';
     case 'job':
-      return route.jobID ? `#/job/${encodeURIComponent(route.jobID)}` : '#/history';
+      if (!route.jobID) return '#/history';
+      return `#/job/${encodeURIComponent(route.jobID)}${jobHashQuery(route)}`;
     case 'report':
       return route.reportID ? `#/report/${encodeURIComponent(route.reportID)}` : '#/history';
     default:
       return '#/analysis';
   }
+}
+
+function jobHashQuery(route: RouteState) {
+  const params = new URLSearchParams();
+  if (route.range) {
+    params.set('range', `${route.range.start},${route.range.end}`);
+  }
+  if (route.entity) {
+    params.set('entity', route.entity);
+  }
+  const query = params.toString();
+  return query ? `?${query}` : '';
+}
+
+function parseHashRange(value: string | null): TimelineRange | undefined {
+  if (!value) return undefined;
+  const [start, end] = value.split(',');
+  if (!start || !end) return undefined;
+  return { start, end };
 }

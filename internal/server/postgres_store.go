@@ -555,6 +555,36 @@ func (s *PostgresStore) jobMessages(ctx context.Context, jobID string) ([]model.
 	return s.jobMessagesInRange(ctx, jobID, nil, nil)
 }
 
+func (s *PostgresStore) jobMessagesByIDs(ctx context.Context, jobID string, ids []string) ([]model.Message, error) {
+	ids = sanitizeMessageIDs(ids)
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var rows []RecordAnalysisJobMessage
+	if err := s.db.WithContext(ctx).Where("job_id = ? AND msg_id IN ?", jobID, ids).Order("seq asc").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	messages := make([]model.Message, 0, len(rows))
+	senderMap := map[string]string{}
+	for _, row := range rows {
+		content := textclean.CleanMessageText(row.Content)
+		if !textclean.IsNaturalMessageText(content) {
+			continue
+		}
+		sender := normalizeStoredSender(row.Sender, senderMap)
+		messages = append(messages, model.Message{
+			ID:             row.MsgID,
+			Sender:         sender,
+			OriginalSender: row.Sender,
+			MsgTime:        row.MsgTime,
+			MsgType:        row.MsgType,
+			Content:        content,
+			RawContent:     row.Content,
+		})
+	}
+	return messages, nil
+}
+
 func (s *PostgresStore) jobMessagesInRange(ctx context.Context, jobID string, start *time.Time, end *time.Time) ([]model.Message, error) {
 	var rows []RecordAnalysisJobMessage
 	query := s.db.WithContext(ctx).Where("job_id = ?", jobID)

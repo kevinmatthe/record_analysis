@@ -1,5 +1,7 @@
 export { EChartsTimelineRenderer } from './EChartsTimelineRenderer';
-export { BranchInspector, InsightInspector } from './TimelineInspectors';
+export { CanvasTimelineRenderer } from './CanvasTimelineRenderer';
+export { BranchInspector, InsightInspector, TimelineDetailPanel } from './TimelineInspectors';
+export type { TimelineDetailSelection } from './TimelineInspectors';
 export { TimelineActionDock, TimelineHeaderControls } from './TimelineControls';
 export { TimelineFloatPanels } from './TimelineFloatPanels';
 export type { TimelineFloatPanelKey } from './TimelineFloatPanels';

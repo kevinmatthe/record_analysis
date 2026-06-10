@@ -18,6 +18,8 @@ export function buildTimelineScene({
       bucket,
       x: Date.parse(bucket.start_time),
       y: 0,
+      label: bucketSummaryLabel(bucket),
+      labelLines: wrapShortText(bucketSummaryText(bucket), 8, 2),
     })),
     insights: buildInsightNodes(sortedBuckets, wordCloudItems, summaryItems),
     branches: buildBranchNodes(branches),
@@ -68,7 +70,7 @@ function buildInsightNodes(
 }
 
 function buildBranchNodes(branches: AnalysisBranch[]): TimelineBranchNode[] {
-  const lanes = [-0.72, -0.96, -0.52];
+  const lanes = [-0.24, -0.34, -0.16];
   const sliced = branches.slice(0, 40).map((branch) => {
     const start = Date.parse(branch.start_time);
     const end = Date.parse(branch.end_time);
@@ -84,7 +86,7 @@ function buildBranchNodes(branches: AnalysisBranch[]): TimelineBranchNode[] {
       branch,
       x: midpoint,
       y: assignedLanes[index] ?? lanes[index % lanes.length],
-      label: `分支 ${shortNodeText(title, 14)}`,
+      label: shortNodeText(title, 12),
     };
   });
 }
@@ -122,6 +124,28 @@ function insightNodeTime(item: AnalysisWorkItem) {
 function shortNodeText(value: string, maxLength: number) {
   const chars = Array.from(value.trim());
   return chars.length > maxLength ? `${chars.slice(0, maxLength).join('')}...` : value.trim();
+}
+
+function bucketSummaryLabel(bucket: TimelineBucket) {
+  return wrapShortText(bucketSummaryText(bucket), 8, 2).join('\n');
+}
+
+function bucketSummaryText(bucket: TimelineBucket) {
+  return bucket.summary_title || bucket.preview || `${bucket.message_count} 条消息`;
+}
+
+function wrapShortText(value: string, charsPerLine: number, maxLines: number) {
+  const compact = value.replace(/\s+/g, ' ').trim();
+  const chars = Array.from(compact);
+  if (chars.length === 0) return ['暂无摘要'];
+  const lines: string[] = [];
+  for (let index = 0; index < chars.length && lines.length < maxLines; index += charsPerLine) {
+    lines.push(chars.slice(index, index + charsPerLine).join(''));
+  }
+  if (chars.length > charsPerLine * maxLines && lines.length > 0) {
+    lines[lines.length - 1] = `${Array.from(lines[lines.length - 1]).slice(0, Math.max(1, charsPerLine - 1)).join('')}…`;
+  }
+  return lines;
 }
 
 function topicSummaryResult(item: AnalysisWorkItem) {

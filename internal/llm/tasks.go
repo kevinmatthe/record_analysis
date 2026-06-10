@@ -47,6 +47,13 @@ type ReportGenerationTask struct {
 	CounterEvidence []string                      `json:"counter_evidence"`
 }
 
+type ReportMergeTask struct {
+	RelationshipID string               `json:"relationship_id"`
+	PeriodStart    string               `json:"period_start"`
+	PeriodEnd      string               `json:"period_end"`
+	Reports        []model.PeriodReport `json:"reports"`
+}
+
 type TopicSummaryTask struct {
 	RelationshipID string          `json:"relationship_id"`
 	ScopeID        string          `json:"scope_id"`
@@ -154,6 +161,15 @@ func BuildReportTask(
 		Dimensions:      dimensions,
 		Events:          events,
 		CounterEvidence: counterEvidence,
+	}
+}
+
+func BuildReportMergeTask(input ReportMergeInput) ReportMergeTask {
+	return ReportMergeTask{
+		RelationshipID: input.RelationshipID,
+		PeriodStart:    input.PeriodStart,
+		PeriodEnd:      input.PeriodEnd,
+		Reports:        input.Reports,
 	}
 }
 

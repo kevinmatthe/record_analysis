@@ -4,6 +4,8 @@ export type TimelineBucketNode = {
   bucket: TimelineBucket;
   x: number;
   y: number;
+  label: string;
+  labelLines: string[];
 };
 
 export type TimelineInsightNode = {

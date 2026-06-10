@@ -203,8 +203,9 @@ func PreviewBranch(messages []model.Message, granularity string, start time.Time
 	if err != nil {
 		return BranchPreview{}, err
 	}
+	normalizedGranularity := normalizeGranularity(granularity)
 	preview := BranchPreview{
-		Granularity: granularity,
+		Granularity: normalizedGranularity,
 		StartTime:   start,
 		EndTime:     end,
 		BucketIDs:   []string{},
@@ -214,15 +215,54 @@ func PreviewBranch(messages []model.Message, granularity string, start time.Time
 		if rangesOverlap(bucket.StartTime, bucket.EndTime, start, end) {
 			preview.MessageCount += bucket.MessageCount
 			preview.BucketIDs = append(preview.BucketIDs, bucket.ID)
-			if preview.TopicHint == "" {
-				preview.TopicHint = timelineBucketTopicHint(bucket)
-			} else if hint := timelineBucketTopicHint(bucket); hint != "" && !strings.Contains(preview.TopicHint, hint) {
-				preview.TopicHint = shortPreview(preview.TopicHint + " / " + hint)
-			}
 			preview.Status = mergeTimelineStatus(preview.Status, timelineBucketStatus(bucket))
 		}
 	}
+	preview.TopicHint = branchDescription(preview.StartTime, preview.EndTime, preview.MessageCount, len(preview.BucketIDs), preview.Granularity)
 	return preview, nil
+}
+
+func branchDescription(start time.Time, end time.Time, messageCount int, bucketCount int, granularity string) string {
+	window := formatBranchWindow(start, end)
+	if messageCount <= 0 || bucketCount <= 0 {
+		if window == "" {
+			return "空片段"
+		}
+		return window + " · 空片段"
+	}
+	return fmt.Sprintf("%s · %d条消息 · %d个%s桶", window, messageCount, bucketCount, granularityLabel(granularity))
+}
+
+func formatBranchWindow(start time.Time, end time.Time) string {
+	if start.IsZero() || end.IsZero() {
+		return ""
+	}
+	if start.Year() == end.Year() && start.YearDay() == end.YearDay() {
+		return fmt.Sprintf("%s-%s", start.Format("01/02 15:04"), end.Format("15:04"))
+	}
+	if start.Year() == end.Year() {
+		return fmt.Sprintf("%s-%s", start.Format("01/02 15:04"), end.Format("01/02 15:04"))
+	}
+	return fmt.Sprintf("%s-%s", start.Format("2006/01/02 15:04"), end.Format("2006/01/02 15:04"))
+}
+
+func granularityLabel(granularity string) string {
+	switch granularity {
+	case "year":
+		return "年"
+	case "month":
+		return "月"
+	case "week":
+		return "周"
+	case "day":
+		return "天"
+	case "15m":
+		return "15分钟"
+	case "5m":
+		return "5分钟"
+	default:
+		return "小时"
+	}
 }
 
 func normalizeGranularity(value string) string {

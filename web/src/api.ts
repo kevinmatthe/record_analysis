@@ -308,6 +308,11 @@ export function getTimelineBucketMessages(id: string, bucketID: string, page: nu
   );
 }
 
+export function getJobMessagesByIDs(id: string, ids: string[]) {
+  const params = new URLSearchParams({ ids: ids.join(',') });
+  return request<PreviewPage>(`/api/jobs/${encodeURIComponent(id)}/messages?${params.toString()}`);
+}
+
 export function searchJobMessages(
   id: string,
   query: string,
@@ -347,6 +352,10 @@ export function listJobBranches(id: string) {
   return request<{ items: AnalysisBranch[] }>(`/api/jobs/${encodeURIComponent(id)}/branches`);
 }
 
+export function getBranch(branchID: string) {
+  return request<AnalysisBranch>(`/api/branches/${encodeURIComponent(branchID)}`);
+}
+
 export function runJobBranch(
   jobID: string,
   branchID: string,
@@ -358,8 +367,12 @@ export function runJobBranch(
   });
 }
 
-export function listWorkItems(jobID: string, kind: string, granularity: string) {
+export function listWorkItems(jobID: string, kind: string, granularity: string, range?: { start: string; end: string } | null) {
   const params = new URLSearchParams({ kind, granularity });
+  if (range) {
+    params.set('start_time', range.start);
+    params.set('end_time', range.end);
+  }
   return request<{ items: AnalysisWorkItem[] }>(`/api/jobs/${encodeURIComponent(jobID)}/work-items?${params.toString()}`);
 }
 

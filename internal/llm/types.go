@@ -25,6 +25,10 @@ type TopicSummaryMerger interface {
 	MergeTopicSummaries(ctx context.Context, input TopicSummaryMergeInput) (TopicSummary, error)
 }
 
+type ReportMerger interface {
+	MergeReports(ctx context.Context, input ReportMergeInput) (model.PeriodReport, error)
+}
+
 type TopicSummaryInput struct {
 	RelationshipID string
 	ScopeID        string
@@ -62,4 +66,11 @@ type ReportInput struct {
 	Events         []model.RelationshipEvent
 	Metrics        model.BehaviorMetrics
 	Dimensions     model.PsychologicalDimensions
+}
+
+type ReportMergeInput struct {
+	RelationshipID string
+	PeriodStart    string
+	PeriodEnd      string
+	Reports        []model.PeriodReport
 }

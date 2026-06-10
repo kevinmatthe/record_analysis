@@ -14,10 +14,11 @@ import (
 )
 
 type AnalyzeOptions struct {
-	Extractor      llm.Extractor
-	MaxLLMMessages int
-	Mode           string
-	Progress       func(stage string, current int, total int)
+	Extractor       llm.Extractor
+	MaxLLMMessages  int
+	Mode            string
+	ChunkLLMReports bool
+	Progress        func(stage string, current int, total int)
 }
 
 func AnalyzeMessages(messages []model.Message, relationshipID string) (model.AnalysisResult, error) {
@@ -48,6 +49,22 @@ func AnalyzeMessagesWithOptions(ctx context.Context, messages []model.Message, r
 		llmMessages := capMessages(clean, opts.MaxLLMMessages)
 		llmSegments := segmentMessages(llmMessages, relationshipID, 30*time.Minute)
 		if opts.Mode == "quick" {
+			if opts.ChunkLLMReports && shouldChunkReportMessages(llmMessages) {
+				report, err = generateChunkedReport(ctx, opts.Extractor, relationshipID, llmMessages, metrics, dimensions, opts.Progress)
+				if err != nil {
+					return model.AnalysisResult{}, err
+				}
+				return model.AnalysisResult{
+					RelationshipID: relationshipID,
+					Messages:       clean,
+					Segments:       segments,
+					Actions:        nil,
+					Events:         nil,
+					Metrics:        metrics,
+					Dimensions:     dimensions,
+					Report:         report,
+				}, nil
+			}
 			reportProgress(opts.Progress, "llm_quick_report_generation", 0, 1)
 			report, err = opts.Extractor.GenerateReport(ctx, llm.ReportInput{
 				RelationshipID: relationshipID,
@@ -123,6 +140,125 @@ func AnalyzeMessagesWithOptions(ctx context.Context, messages []model.Message, r
 		Dimensions:     dimensions,
 		Report:         report,
 	}, nil
+}
+
+const defaultReportChunkMessages = 180
+
+func shouldChunkReportMessages(messages []model.Message) bool {
+	return len(messages) > defaultReportChunkMessages
+}
+
+func generateChunkedReport(ctx context.Context, extractor llm.Extractor, relationshipID string, messages []model.Message, metrics model.BehaviorMetrics, dimensions model.PsychologicalDimensions, progress func(stage string, current int, total int)) (model.PeriodReport, error) {
+	chunks := chunkMessagesByCount(messages, defaultReportChunkMessages)
+	reports := make([]model.PeriodReport, 0, len(chunks))
+	reportProgress(progress, "llm_branch_chunk_reports", 0, len(chunks))
+	for index, chunk := range chunks {
+		chunkMetrics := computeMetrics(chunk, nil, nil, relationshipID)
+		chunkDimensions := model.PsychologicalDimensions{
+			RelationshipID: relationshipID,
+			PeriodStart:    chunkMetrics.PeriodStart,
+			PeriodEnd:      chunkMetrics.PeriodEnd,
+			Values:         dimensions.Values,
+		}
+		report, err := extractor.GenerateReport(ctx, llm.ReportInput{
+			RelationshipID: relationshipID,
+			Messages:       chunk,
+			Segments:       segmentMessages(chunk, relationshipID, 30*time.Minute),
+			Metrics:        chunkMetrics,
+			Dimensions:     chunkDimensions,
+		})
+		if err != nil {
+			return model.PeriodReport{}, err
+		}
+		if report.PeriodStart.IsZero() {
+			report.PeriodStart = chunkMetrics.PeriodStart
+		}
+		if report.PeriodEnd.IsZero() {
+			report.PeriodEnd = chunkMetrics.PeriodEnd
+		}
+		reports = append(reports, report)
+		reportProgress(progress, "llm_branch_chunk_reports", index+1, len(chunks))
+	}
+	if merger, ok := extractor.(llm.ReportMerger); ok {
+		reportProgress(progress, "llm_branch_report_merge", 0, 1)
+		merged, err := merger.MergeReports(ctx, llm.ReportMergeInput{
+			RelationshipID: relationshipID,
+			PeriodStart:    metrics.PeriodStart.Format(time.RFC3339),
+			PeriodEnd:      metrics.PeriodEnd.Format(time.RFC3339),
+			Reports:        reports,
+		})
+		if err != nil {
+			return model.PeriodReport{}, err
+		}
+		if merged.PeriodStart.IsZero() {
+			merged.PeriodStart = metrics.PeriodStart
+		}
+		if merged.PeriodEnd.IsZero() {
+			merged.PeriodEnd = metrics.PeriodEnd
+		}
+		reportProgress(progress, "llm_branch_report_merge", 1, 1)
+		return merged, nil
+	}
+	return mergeReportsLocally(relationshipID, metrics, reports), nil
+}
+
+func chunkMessagesByCount(messages []model.Message, chunkSize int) [][]model.Message {
+	if chunkSize <= 0 || len(messages) <= chunkSize {
+		return [][]model.Message{messages}
+	}
+	chunks := make([][]model.Message, 0, (len(messages)+chunkSize-1)/chunkSize)
+	for start := 0; start < len(messages); start += chunkSize {
+		end := start + chunkSize
+		if end > len(messages) {
+			end = len(messages)
+		}
+		chunks = append(chunks, messages[start:end])
+	}
+	return chunks
+}
+
+func mergeReportsLocally(relationshipID string, metrics model.BehaviorMetrics, reports []model.PeriodReport) model.PeriodReport {
+	var builder strings.Builder
+	builder.WriteString("# 分段关系互动报告汇总\n\n")
+	builder.WriteString(fmt.Sprintf("本片段消息量较大，已拆分为 %d 个窗口分别分析。以下为分段结果汇总，建议继续使用聚合模型生成更精炼的总报告。\n", len(reports)))
+	for index, report := range reports {
+		builder.WriteString(fmt.Sprintf("\n## 分段 %d：%s - %s\n\n", index+1, report.PeriodStart.Format("2006-01-02 15:04"), report.PeriodEnd.Format("2006-01-02 15:04")))
+		builder.WriteString(strings.TrimSpace(report.Markdown))
+		builder.WriteString("\n")
+	}
+	return model.PeriodReport{
+		RelationshipID:   relationshipID,
+		PeriodType:       "branch_chunked",
+		PeriodStart:      metrics.PeriodStart,
+		PeriodEnd:        metrics.PeriodEnd,
+		Markdown:         builder.String(),
+		EvidenceEventIDs: uniqueEventIDs(reports),
+		ModelName:        firstReportModelName(reports),
+	}
+}
+
+func uniqueEventIDs(reports []model.PeriodReport) []string {
+	seen := map[string]bool{}
+	var ids []string
+	for _, report := range reports {
+		for _, id := range report.EvidenceEventIDs {
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func firstReportModelName(reports []model.PeriodReport) string {
+	for _, report := range reports {
+		if report.ModelName != "" {
+			return report.ModelName
+		}
+	}
+	return ""
 }
 
 func reportProgress(progress func(stage string, current int, total int), stage string, current int, total int) {

@@ -47,7 +47,8 @@ export function EChartsTimelineRenderer({
       chart = echarts.init(chartRef.current);
       setLoadingRenderer(false);
     const scene = buildTimelineScene({ buckets, wordCloudItems, summaryItems, branches });
-    const chartBuckets = scene.buckets.map((node) => node.bucket);
+    const bucketNodes = scene.buckets;
+    const chartBuckets = bucketNodes.map((node) => node.bucket);
     const data = chartBuckets.map((bucket) => [
       new Date(bucket.start_time).getTime(),
       0,
@@ -61,8 +62,8 @@ export function EChartsTimelineRenderer({
       bucket.summary_title ?? '',
       bucket.total_tokens ?? 0,
     ]);
-    const selectedStart = selectedRange ? new Date(selectedRange.start).getTime() : null;
-    const selectedEnd = selectedRange ? new Date(selectedRange.end).getTime() : null;
+    const peakMessages = Math.max(bucketPeak, ...chartBuckets.map((bucket) => bucket.message_count), 1);
+    const smoothBandData = buildSmoothBandData(chartBuckets, peakMessages, selectedBucketID, selectedRange);
     const [xMin, xMax] = timelineExtent(chartBuckets, granularity);
     const floatNodes = scene.insights.map((node) => [
       node.x,
@@ -89,7 +90,7 @@ export function EChartsTimelineRenderer({
       animationDuration: 520,
       animationEasing: 'cubicOut',
       backgroundColor: 'transparent',
-      grid: { left: 24, right: 18, top: 52, bottom: 58 },
+      grid: { left: 24, right: 18, top: 72, bottom: 58 },
       tooltip: {
         trigger: 'item',
         confine: true,
@@ -104,15 +105,16 @@ export function EChartsTimelineRenderer({
             const time = formatTimelineAxisLabel(Number(params.data?.[0] ?? 0), granularity);
             return `<strong>${time}</strong><br/>${label}`;
           }
+          if (params.seriesName === 'bucket-band') {
+            const bucketID = params.data?.[4];
+            const bucket = chartBuckets.find((item) => item.id === bucketID);
+            if (!bucket) return '';
+            return bucketTooltip(bucket);
+          }
           const index = params.dataIndex as number;
           const bucket = chartBuckets[index];
           if (!bucket) return '';
-          const title = bucket.summary_title || bucket.preview;
-          const preview = title ? `<br/><span style="color:#5f6f72">${escapeHtml(title.slice(0, 80))}</span>` : '';
-          const summaryStatus = bucket.summary_status ? `<br/>摘要：${bucket.summary_status}` : '';
-          const wordCloudStatus = bucket.word_cloud_status ? ` · 词云：${bucket.word_cloud_status}` : '';
-          const tokens = bucket.total_tokens ? `<br/>${bucket.total_tokens} tokens` : '';
-          return `<strong>${formatBucketWindow(bucket)}</strong><br/>${bucket.message_count} 条消息 · ${bucket.participant_count} 人${summaryStatus}${wordCloudStatus}${tokens}${preview}`;
+          return bucketTooltip(bucket);
         },
       },
       brush: {
@@ -121,9 +123,10 @@ export function EChartsTimelineRenderer({
         throttleType: 'debounce',
         throttleDelay: 180,
         brushStyle: {
-          color: 'rgba(19, 93, 102, 0.12)',
+          color: 'rgba(19, 93, 102, 0.035)',
           borderColor: '#135d66',
-          borderWidth: 1,
+          borderWidth: 2,
+          borderType: 'dashed',
         },
       },
       dataZoom: [
@@ -149,15 +152,24 @@ export function EChartsTimelineRenderer({
         axisLabel: {
           color: '#657577',
           hideOverlap: true,
+          showMinLabel: true,
+          showMaxLabel: true,
+          margin: 14,
           formatter: (value: number) => formatTimelineAxisLabel(value, granularity),
+        },
+        axisPointer: {
+          show: true,
+          label: {
+            formatter: (params: any) => formatTimelineAxisLabel(Number(params.value), granularity),
+          },
         },
         splitLine: { show: false },
       },
       yAxis: {
         type: 'value',
         show: false,
-        min: -1.15,
-        max: 1.15,
+        min: -0.9,
+        max: 0.9,
       },
       series: [
         {
@@ -186,16 +198,33 @@ export function EChartsTimelineRenderer({
           type: 'line',
           data: data.map((item) => [item[0], 0]),
           symbol: 'none',
-          lineStyle: { color: '#0d4047', width: 3, shadowBlur: 12, shadowColor: 'rgba(19, 93, 102, 0.22)' },
+          lineStyle: { color: 'rgba(13, 64, 71, 0.28)', width: 4, shadowBlur: 12, shadowColor: 'rgba(19, 93, 102, 0.22)' },
           silent: true,
-          markArea:
-            selectedStart !== null && selectedEnd !== null
-              ? {
-                  silent: true,
-                  itemStyle: { color: 'rgba(19, 93, 102, 0.08)' },
-                  data: [[{ xAxis: selectedStart }, { xAxis: selectedEnd }]],
-                }
-              : undefined,
+        },
+        {
+          name: 'bucket-band',
+          type: 'custom',
+          data: smoothBandData,
+          renderItem: (params: any, api: any) => {
+            const status = api.value(6);
+            const bucketID = api.value(4);
+            const selected = bucketID === selectedBucketID || Boolean(api.value(15));
+            const rangeSelected = Boolean(api.value(15));
+            const points = taperedSegmentPoints(api, selected);
+            return {
+              type: 'path',
+              shape: { pathData: taperedSegmentPath(points) },
+              style: {
+                fill: bucketStatusColor(status, selected),
+                opacity: 1,
+                shadowBlur: rangeSelected ? 28 : selected ? 22 : 14,
+                shadowColor: rangeSelected ? 'rgba(13, 64, 71, 0.34)' : 'rgba(13, 64, 71, 0.24)',
+              },
+            };
+          },
+          encode: { x: [0, 2], y: 3 },
+          z: 3,
+          silent: false,
         },
         {
           name: 'insights',
@@ -230,7 +259,11 @@ export function EChartsTimelineRenderer({
           name: 'branches',
           type: 'scatter',
           data: branchNodes,
-          symbolSize: (value: unknown[]) => (String(value[7]) === 'completed' ? 14 : 11),
+          symbol: 'roundRect',
+          symbolSize: (value: unknown[]) => {
+            const label = String(value[2] ?? '');
+            return [Math.min(116, Math.max(48, label.length * 11 + 22)), 24];
+          },
           itemStyle: {
             color: (params: any) => branchStatusColor(params.data?.[7], params.data?.[3] === selectedBranchID),
             borderColor: (params: any) => (params.data?.[3] === selectedBranchID ? '#0d4047' : '#ffffff'),
@@ -240,16 +273,14 @@ export function EChartsTimelineRenderer({
           },
           label: {
             show: true,
-            position: 'bottom',
+            position: 'inside',
             formatter: (params: any) => params.data?.[2] ?? '',
-            color: '#26383b',
-            fontSize: 12,
-            lineHeight: 18,
-            backgroundColor: 'rgba(255, 255, 255, 0.92)',
-            borderColor: 'rgba(15, 79, 87, 0.22)',
-            borderWidth: 1,
-            borderRadius: 6,
-            padding: [5, 8],
+            color: '#ffffff',
+            fontSize: 11,
+            lineHeight: 15,
+            padding: [0, 6],
+            overflow: 'truncate',
+            width: 96,
           },
           emphasis: {
             scale: 1.15,
@@ -260,32 +291,29 @@ export function EChartsTimelineRenderer({
           name: 'buckets',
           type: 'scatter',
           data,
-          symbolSize: (value: unknown[]) => {
-            const count = Number(value[2] ?? 0);
-            return Math.max(9, Math.min(30, 9 + (count / Math.max(bucketPeak, 1)) * 21));
-          },
-          itemStyle: {
-            color: (params: any) => bucketStatusColor(params.data?.[6], params.data?.[3] === selectedBucketID),
-            borderColor: '#ffffff',
-            borderWidth: 2,
-            shadowBlur: 8,
-            shadowColor: 'rgba(19, 93, 102, 0.22)',
-          },
-          emphasis: {
-            scale: 1.2,
-            itemStyle: { color: '#0a3f46' },
-          },
+          symbolSize: 34,
+          itemStyle: { opacity: 0 },
           label: {
             show: true,
             position: 'top',
             formatter: (params: any) => {
-              const count = String(params.data?.[2] ?? '');
-              const marker = bucketStatusMarker(params.data?.[6]);
-              return `${count}${marker}`;
+              const bucketID = params.data?.[3];
+              const bucketNode = bucketNodes.find((item) => item.bucket.id === bucketID);
+              return bucketNode?.label ?? '';
             },
             color: '#26383b',
             fontSize: 11,
+            fontWeight: 700,
+            lineHeight: 14,
+            backgroundColor: 'rgba(255, 255, 255, 0.78)',
+            borderColor: 'rgba(13, 64, 71, 0.14)',
+            borderWidth: 1,
+            borderRadius: 6,
+            padding: [5, 7],
+            width: 86,
+            overflow: 'break',
           },
+          z: 5,
         },
       ],
       graphic:
@@ -320,6 +348,12 @@ export function EChartsTimelineRenderer({
         const branchID = params.data?.[3];
         const branch = branches.find((item) => item.id === branchID);
         if (branch) onSelectBranch(branch);
+        return;
+      }
+      if (params.seriesName === 'bucket-segments' || params.seriesName === 'bucket-band') {
+        const bucketID = params.data?.[4] ?? params.data?.[3];
+        const bucket = chartBuckets.find((item) => item.id === bucketID);
+        if (bucket) onSelectBucket(bucket);
         return;
       }
       const bucketID = params.data?.[3];
@@ -375,6 +409,7 @@ export function EChartsTimelineRenderer({
 function formatDate(value: string) {
   if (!value || value.startsWith('0001-')) return '未知时间';
   return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -384,6 +419,146 @@ function formatDate(value: string) {
 
 function formatBucketWindow(bucket: TimelineBucket) {
   return `${formatDate(bucket.start_time)} - ${formatDate(bucket.end_time)}`;
+}
+
+function bucketCenterTime(bucket: TimelineBucket) {
+  const start = new Date(bucket.start_time).getTime();
+  const end = new Date(bucket.end_time).getTime();
+  if (Number.isFinite(start) && Number.isFinite(end)) {
+    return start + (end - start) / 2;
+  }
+  return start;
+}
+
+function bucketThickness(count: number, peak: number, selected: boolean) {
+  const safePeak = Math.max(peak, 1);
+  const ratio = Math.max(0, Math.min(1, count / safePeak));
+  return 8 + ratio * 24 + (selected ? 5 : 0);
+}
+
+function buildSmoothBandData(
+  buckets: TimelineBucket[],
+  peak: number,
+  selectedBucketID: string,
+  selectedRange: { start: string; end: string } | null,
+) {
+  const centers = buckets.map((bucket) => bucketCenterTime(bucket));
+  return buckets.map((bucket, index) => {
+    const selected = bucket.id === selectedBucketID || bucketInRange(bucket, selectedRange);
+    const thickness = bucketThickness(bucket.message_count, peak, selected);
+    const previousBucket = buckets[index - 1];
+    const nextBucket = buckets[index + 1];
+    const previousSelected = previousBucket ? previousBucket.id === selectedBucketID || bucketInRange(previousBucket, selectedRange) : selected;
+    const nextSelected = nextBucket ? nextBucket.id === selectedBucketID || bucketInRange(nextBucket, selectedRange) : selected;
+    const previousThickness = previousBucket ? bucketThickness(previousBucket.message_count, peak, previousSelected) : thickness;
+    const nextThickness = nextBucket ? bucketThickness(nextBucket.message_count, peak, nextSelected) : thickness;
+    return [
+      centers[index],
+      new Date(bucket.start_time).getTime(),
+      new Date(bucket.end_time).getTime(),
+      thickness,
+      bucket.id,
+      bucket.preview,
+      bucket.analysis_status ?? 'unseen',
+      bucket.summary_status ?? '',
+      bucket.word_cloud_status ?? '',
+      previousBucket ? centers[index - 1] : 0,
+      nextBucket ? centers[index + 1] : 0,
+      previousThickness,
+      nextThickness,
+      bucket.summary_title ?? '',
+      bucket.total_tokens ?? 0,
+      selected,
+    ];
+  });
+}
+
+function taperedSegmentPoints(api: any, selected = false) {
+  const center = api.coord([api.value(0), 0]);
+  const start = api.coord([api.value(1), 0]);
+  const end = api.coord([api.value(2), 0]);
+  const previousTime = Number(api.value(9));
+  const nextTime = Number(api.value(10));
+  const previousCenter = previousTime ? api.coord([previousTime, 0]) : null;
+  const nextCenter = nextTime ? api.coord([nextTime, 0]) : null;
+  const leftX = previousCenter ? (previousCenter[0] + center[0]) / 2 : start[0];
+  const rightX = nextCenter ? (nextCenter[0] + center[0]) / 2 : end[0];
+  const currentHalf = Number(api.value(3)) / 2;
+  const leftHalf = ((previousCenter ? Number(api.value(11)) : Number(api.value(3))) + Number(api.value(3))) / 4;
+  const rightHalf = ((nextCenter ? Number(api.value(12)) : Number(api.value(3))) + Number(api.value(3))) / 4;
+  const rangeSelected = Boolean(api.value(15));
+  const y = center[1] + (rangeSelected ? -10 : selected ? -7 : 0);
+  const leftSpan = Math.max(1, center[0] - leftX);
+  const rightSpan = Math.max(1, rightX - center[0]);
+  return {
+    leftX,
+    centerX: center[0],
+    rightX,
+    y,
+    leftHalf,
+    currentHalf,
+    rightHalf,
+    upperLeftCPX: leftX + leftSpan * 0.58,
+    upperRightCPX: center[0] - leftSpan * 0.34,
+    lowerLeftCPX: leftX + leftSpan * 0.58,
+    lowerRightCPX: center[0] - leftSpan * 0.34,
+    nextUpperLeftCPX: center[0] + rightSpan * 0.34,
+    nextUpperRightCPX: rightX - rightSpan * 0.58,
+    nextLowerLeftCPX: center[0] + rightSpan * 0.34,
+    nextLowerRightCPX: rightX - rightSpan * 0.58,
+  };
+}
+
+function bucketInRange(bucket: TimelineBucket, range: { start: string; end: string } | null) {
+  if (!range) return false;
+  return rangesOverlap(bucket.start_time, bucket.end_time, range.start, range.end);
+}
+
+function rangesOverlap(startA: string, endA: string, startB: string, endB: string) {
+  const aStart = new Date(startA).getTime();
+  const aEnd = new Date(endA).getTime();
+  const bStart = new Date(startB).getTime();
+  const bEnd = new Date(endB).getTime();
+  if (![aStart, aEnd, bStart, bEnd].every(Number.isFinite)) return false;
+  return aStart < bEnd && aEnd > bStart;
+}
+
+function taperedSegmentPath(points: ReturnType<typeof taperedSegmentPoints>) {
+  const {
+    leftX,
+    centerX,
+    rightX,
+    y,
+    leftHalf,
+    currentHalf,
+    rightHalf,
+    upperLeftCPX,
+    upperRightCPX,
+    lowerLeftCPX,
+    lowerRightCPX,
+    nextUpperLeftCPX,
+    nextUpperRightCPX,
+    nextLowerLeftCPX,
+    nextLowerRightCPX,
+  } = points;
+  return [
+    `M ${leftX} ${y - leftHalf}`,
+    `C ${upperLeftCPX} ${y - leftHalf}, ${upperRightCPX} ${y - currentHalf}, ${centerX} ${y - currentHalf}`,
+    `C ${nextUpperLeftCPX} ${y - currentHalf}, ${nextUpperRightCPX} ${y - rightHalf}, ${rightX} ${y - rightHalf}`,
+    `L ${rightX} ${y + rightHalf}`,
+    `C ${nextLowerRightCPX} ${y + rightHalf}, ${nextLowerLeftCPX} ${y + currentHalf}, ${centerX} ${y + currentHalf}`,
+    `C ${lowerRightCPX} ${y + currentHalf}, ${lowerLeftCPX} ${y + leftHalf}, ${leftX} ${y + leftHalf}`,
+    'Z',
+  ].join(' ');
+}
+
+function bucketTooltip(bucket: TimelineBucket) {
+  const title = bucket.summary_title || bucket.preview;
+  const preview = title ? `<br/><span style="color:#5f6f72">${escapeHtml(title.slice(0, 80))}</span>` : '';
+  const summaryStatus = bucket.summary_status ? `<br/>摘要：${bucket.summary_status}` : '';
+  const wordCloudStatus = bucket.word_cloud_status ? ` · 词云：${bucket.word_cloud_status}` : '';
+  const tokens = bucket.total_tokens ? `<br/>${bucket.total_tokens} tokens` : '';
+  return `<strong>${formatBucketWindow(bucket)}</strong><br/>${bucket.message_count} 条消息 · ${bucket.participant_count} 人${summaryStatus}${wordCloudStatus}${tokens}${preview}`;
 }
 
 function timelineExtent(buckets: TimelineBucket[], granularity: TimelineGranularity): [number | undefined, number | undefined] {
@@ -422,8 +597,8 @@ function formatTimelineAxisLabel(value: number, granularity: TimelineGranularity
       : granularity === 'month'
         ? { year: '2-digit', month: '2-digit' }
         : granularity === 'week' || granularity === 'day'
-          ? { month: '2-digit', day: '2-digit' }
-          : { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' };
+          ? { year: '2-digit', month: '2-digit', day: '2-digit' }
+          : { year: '2-digit', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' };
   return new Intl.DateTimeFormat('zh-CN', options).format(date);
 }
 
@@ -451,21 +626,6 @@ function bucketStatusColor(status: unknown, selected: boolean) {
       return '#98a7aa';
     default:
       return '#98a7aa';
-  }
-}
-
-function bucketStatusMarker(status: unknown) {
-  switch (status) {
-    case 'running':
-      return ' · 运行';
-    case 'queued':
-      return ' · 排队';
-    case 'failed':
-      return ' · 失败';
-    case 'completed':
-      return ' · 完成';
-    default:
-      return '';
   }
 }
 

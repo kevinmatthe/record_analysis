@@ -35,13 +35,14 @@ type analyzeRequest struct {
 }
 
 type Options struct {
-	MaxUploadBytes int64
-	MaxLLMMessages int
-	AuthUsername   string
-	AuthPassword   string
-	AllowedOrigin  string
-	Store          *PostgresStore
-	Indexer        search.Indexer
+	MaxUploadBytes      int64
+	MaxLLMMessages      int
+	AuthUsername        string
+	AuthPassword        string
+	AllowedOrigin       string
+	Store               *PostgresStore
+	Indexer             search.Indexer
+	WorkItemConcurrency int
 }
 
 type Handler struct {
@@ -407,6 +408,10 @@ func (h *Handler) jobDetailHandler(w http.ResponseWriter, r *http.Request) {
 			h.handleSearchMessages(w, r, id, true)
 			return
 		}
+		if suffix == "messages" && r.Method == http.MethodGet {
+			h.handleMessagesByIDs(w, r, id, true)
+			return
+		}
 		if suffix == "work-items/seed" && r.Method == http.MethodPost {
 			h.handleSeedWorkItems(w, r, id)
 			return
@@ -549,6 +554,12 @@ func (h *Handler) jobDetailHandler(w http.ResponseWriter, r *http.Request) {
 		messages := append([]model.Message(nil), job.messages...)
 		h.mu.Unlock()
 		h.handleSearchMessagesFromMessages(w, r, id, messages)
+		return
+	}
+	if suffix == "messages" && r.Method == http.MethodGet {
+		messages := append([]model.Message(nil), job.messages...)
+		h.mu.Unlock()
+		h.handleMessagesByIDsFromMessages(w, r, messages)
 		return
 	}
 	copy := cloneJob(job)
@@ -844,7 +855,7 @@ func (h *Handler) runWorkItemWorker() {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		h.processWorkItemsBurst(1)
+		h.processWorkItemsBurst(h.workItemConcurrency())
 	}
 }
 
@@ -852,11 +863,28 @@ func (h *Handler) processWorkItemsBurst(limit int) {
 	if h.store == nil || limit <= 0 {
 		return
 	}
-	for i := 0; i < limit; i++ {
-		if ok := h.processOneWorkItem(context.Background()); !ok {
-			return
+	workers := minInt(limit, h.workItemConcurrency())
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = h.processOneWorkItem(context.Background())
+		}()
+	}
+	wg.Wait()
+}
+
+func (h *Handler) workItemConcurrency() int {
+	if h.options.WorkItemConcurrency > 0 {
+		return minInt(h.options.WorkItemConcurrency, 4)
+	}
+	if raw := strings.TrimSpace(os.Getenv("RECORD_ANALYSIS_WORK_ITEM_CONCURRENCY")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			return minInt(parsed, 4)
 		}
 	}
+	return 2
 }
 
 func (h *Handler) processOneWorkItem(ctx context.Context) bool {
@@ -930,13 +958,15 @@ func (h *Handler) processSummaryMergeWorkItem(ctx context.Context, item Analysis
 		usage.CompletionTokens += event.CompletionTokens
 		usage.TotalTokens += event.TotalTokens
 	})
-	merged, err := merger.MergeTopicSummaries(mergeCtx, llm.TopicSummaryMergeInput{
-		RelationshipID: relationshipID,
-		ScopeID:        item.ScopeID,
-		Granularity:    item.Granularity,
-		StartTime:      item.StartTime.Format(time.RFC3339),
-		EndTime:        item.EndTime.Format(time.RFC3339),
-		Summaries:      summaries,
+	merged, err := retryLLMCall(mergeCtx, func(ctx context.Context) (llm.TopicSummary, error) {
+		return merger.MergeTopicSummaries(ctx, llm.TopicSummaryMergeInput{
+			RelationshipID: relationshipID,
+			ScopeID:        item.ScopeID,
+			Granularity:    item.Granularity,
+			StartTime:      item.StartTime.Format(time.RFC3339),
+			EndTime:        item.EndTime.Format(time.RFC3339),
+			Summaries:      summaries,
+		})
 	})
 	if err != nil {
 		_ = h.store.FailWorkItem(ctx, item.ID, err)
@@ -974,13 +1004,15 @@ func (h *Handler) processTopicSummaryWorkItem(ctx context.Context, item Analysis
 		usage.CompletionTokens += event.CompletionTokens
 		usage.TotalTokens += event.TotalTokens
 	})
-	summary, err := summarizer.SummarizeTopic(summaryCtx, llm.TopicSummaryInput{
-		RelationshipID: relationshipID,
-		ScopeID:        item.ScopeID,
-		Granularity:    item.Granularity,
-		StartTime:      item.StartTime.Format(time.RFC3339),
-		EndTime:        item.EndTime.Format(time.RFC3339),
-		Messages:       messages,
+	summary, err := retryLLMCall(summaryCtx, func(ctx context.Context) (llm.TopicSummary, error) {
+		return summarizer.SummarizeTopic(ctx, llm.TopicSummaryInput{
+			RelationshipID: relationshipID,
+			ScopeID:        item.ScopeID,
+			Granularity:    item.Granularity,
+			StartTime:      item.StartTime.Format(time.RFC3339),
+			EndTime:        item.EndTime.Format(time.RFC3339),
+			Messages:       messages,
+		})
 	})
 	if err != nil {
 		_ = h.store.FailWorkItem(ctx, item.ID, err)
@@ -1017,6 +1049,52 @@ func (h *Handler) indexWorkItemSummary(ctx context.Context, item AnalysisWorkIte
 	}); err != nil && h.store != nil {
 		_ = h.store.AddJobEvent(ctx, item.JobID, "OpenSearch 摘要索引失败，已保留 Postgres 结果："+err.Error())
 	}
+}
+
+func retryLLMCall[T any](ctx context.Context, call func(context.Context) (T, error)) (T, error) {
+	var zero T
+	var lastErr error
+	backoffs := []time.Duration{0, 800 * time.Millisecond, 2 * time.Second, 5 * time.Second}
+	for attempt, backoff := range backoffs {
+		if backoff > 0 {
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return zero, ctx.Err()
+			case <-timer.C:
+			}
+		}
+		result, err := call(ctx)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if !isRetryableLLMError(err) || attempt == len(backoffs)-1 {
+			return zero, err
+		}
+	}
+	return zero, lastErr
+}
+
+func isRetryableLLMError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "429") ||
+		strings.Contains(text, "rate limit") ||
+		strings.Contains(text, "too many request") ||
+		strings.Contains(text, "timeout") ||
+		strings.Contains(text, "temporarily unavailable") ||
+		strings.Contains(text, "connection reset")
+}
+
+func minInt(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (h *Handler) handleBranchPreview(w http.ResponseWriter, r *http.Request, jobID string, fromStore bool) {
@@ -1207,7 +1285,25 @@ func (h *Handler) handleListWorkItems(w http.ResponseWriter, r *http.Request, jo
 		writeError(w, http.StatusBadRequest, fmt.Errorf("work item store unavailable"))
 		return
 	}
-	items, err := h.store.ListWorkItems(r.Context(), jobID, r.URL.Query().Get("kind"), r.URL.Query().Get("granularity"))
+	var start *time.Time
+	var end *time.Time
+	if raw := strings.TrimSpace(r.URL.Query().Get("start_time")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid start_time"))
+			return
+		}
+		start = &parsed
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("end_time")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid end_time"))
+			return
+		}
+		end = &parsed
+	}
+	items, err := h.store.ListWorkItemsInRange(r.Context(), jobID, r.URL.Query().Get("kind"), r.URL.Query().Get("granularity"), start, end)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -1273,6 +1369,33 @@ func (h *Handler) handleSearchMessagesFromMessages(w http.ResponseWriter, r *htt
 	writeJSON(w, http.StatusOK, messageSearchPage(filterMessagesByQuery(messages, query), page, pageSize, "memory"))
 }
 
+func (h *Handler) handleMessagesByIDs(w http.ResponseWriter, r *http.Request, jobID string, fromStore bool) {
+	ids := parseMessageIDs(r.URL.Query().Get("ids"))
+	if len(ids) == 0 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("ids query is required"))
+		return
+	}
+	if h.store == nil || !fromStore {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("message store unavailable"))
+		return
+	}
+	messages, err := h.store.jobMessagesByIDs(r.Context(), jobID, ids)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, previewPage(orderMessagesByIDs(messages, ids), 1, len(ids)))
+}
+
+func (h *Handler) handleMessagesByIDsFromMessages(w http.ResponseWriter, r *http.Request, messages []model.Message) {
+	ids := parseMessageIDs(r.URL.Query().Get("ids"))
+	if len(ids) == 0 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("ids query is required"))
+		return
+	}
+	writeJSON(w, http.StatusOK, previewPage(orderMessagesByIDs(messages, ids), 1, len(ids)))
+}
+
 func searchResultToMessagePage(result search.MessageSearchResult) MessageSearchPage {
 	items := make([]MessagePreview, 0, len(result.Items))
 	for _, doc := range result.Items {
@@ -1315,6 +1438,46 @@ func filterMessagesByQuery(messages []model.Message, query string) []model.Messa
 		}
 	}
 	return filtered
+}
+
+func parseMessageIDs(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return sanitizeMessageIDs(strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\n' || r == '\t'
+	}))
+}
+
+func sanitizeMessageIDs(ids []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		result = append(result, id)
+		if len(result) >= 100 {
+			break
+		}
+	}
+	return result
+}
+
+func orderMessagesByIDs(messages []model.Message, ids []string) []model.Message {
+	byID := make(map[string]model.Message, len(messages))
+	for _, message := range messages {
+		byID[message.ID] = message
+	}
+	ordered := make([]model.Message, 0, len(messages))
+	for _, id := range sanitizeMessageIDs(ids) {
+		if message, ok := byID[id]; ok {
+			ordered = append(ordered, message)
+		}
+	}
+	return ordered
 }
 
 func (h *Handler) handleCreateSummaryMergeWorkItem(w http.ResponseWriter, r *http.Request, jobID string) {
@@ -1493,9 +1656,10 @@ func (h *Handler) runBranch(branchID string, messages []model.Message, mode stri
 		})
 	})
 	result, err := analyzer.AnalyzeMessagesWithOptions(ctx, messages, branchRelationshipID(messages), analyzer.AnalyzeOptions{
-		Extractor:      h.svcExtractor(),
-		MaxLLMMessages: maxLLMMessages,
-		Mode:           mode,
+		Extractor:       h.svcExtractor(),
+		MaxLLMMessages:  maxLLMMessages,
+		Mode:            mode,
+		ChunkLLMReports: true,
 		Progress: func(stage string, current int, total int) {
 			h.updateBranch(branchID, "running", stageLabel(stage), stageProgress(stage, current, total), nil)
 		},
@@ -1659,6 +1823,12 @@ func stageLabel(stage string) string {
 		return "LLM 生成分析报告"
 	case "llm_quick_report_generation":
 		return "LLM 快速生成报告"
+	case "llm_branch_chunk_reports":
+		return "LLM 分段生成 Branch 报告"
+	case "llm_branch_report_merge":
+		return "LLM 汇总 Branch 分段报告"
+	case "report_merge":
+		return "LLM 汇总 Branch 分段报告"
 	case "analysis_without_llm":
 		return "未启用 LLM，生成基础统计报告"
 	case "report_persist":
@@ -1677,6 +1847,8 @@ func stageProgress(stage string, current int, total int) float64 {
 		"llm_dimension_generation":    0.78,
 		"llm_report_generation":       0.9,
 		"llm_quick_report_generation": 0.82,
+		"llm_branch_chunk_reports":    0.55,
+		"llm_branch_report_merge":     0.86,
 		"analysis_without_llm":        0.85,
 		"report_persist":              0.96,
 	}[stage]

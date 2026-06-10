@@ -5,99 +5,65 @@ export function TimelineHeaderControls({
   timelineWindowLabel,
   granularity,
   resolvedGranularity,
-  visibleGranularities,
-  canUseFineGranularity,
-  zoomIndex,
-  zoomStepsLength,
   hasTimelineWindow,
-  seedingWorkItems,
-  timelineLength,
-  onGranularityChange,
-  onZoom,
   onResetTimelineWindow,
-  onSeedWordClouds,
 }: {
   timelineWindowLabel: string;
   granularity: 'auto' | TimelineGranularity;
   resolvedGranularity: TimelineGranularity;
-  visibleGranularities: ReadonlyArray<'auto' | TimelineGranularity>;
-  canUseFineGranularity: boolean;
-  zoomIndex: number;
-  zoomStepsLength: number;
   hasTimelineWindow: boolean;
-  seedingWorkItems: boolean;
-  timelineLength: number;
-  onGranularityChange: (value: 'auto' | TimelineGranularity) => void;
-  onZoom: (direction: 'in' | 'out') => void;
   onResetTimelineWindow: () => void;
-  onSeedWordClouds: () => void;
 }) {
   return (
     <div className="timelineHeader">
-      <div>
-        <h2>时间轴</h2>
-        <p>
-          {timelineWindowLabel}
-          {' · '}
-          当前按 {granularity === 'auto' ? `自动粒度 (${granularityLabel(resolvedGranularity)})` : granularityLabel(resolvedGranularity)} 聚合消息桶。
-        </p>
-      </div>
-      <div className="timelineControls">
-        <div className="segmented">
-          {visibleGranularities.map((value) => {
-            const disabled = value !== 'auto' && isFineGranularity(value) && !canUseFineGranularity;
-            return (
-              <button
-                key={value}
-                className={granularity === value ? 'active' : ''}
-                disabled={disabled}
-                onClick={() => onGranularityChange(value)}
-                title={disabled ? '先框选一段时间，再进入小时或分钟级' : undefined}
-              >
-                {granularityLabel(value)}
-              </button>
-            );
-          })}
-        </div>
-        <div className="zoomControls">
-          <button className="secondary iconOnly" onClick={() => onZoom('out')} disabled={zoomIndex <= 0 && granularity !== 'auto'} title="缩小时间尺度">
-            <ZoomOut size={16} />
-          </button>
-          <button className="secondary iconOnly" onClick={() => onZoom('in')} disabled={zoomIndex >= zoomStepsLength - 1 && granularity !== 'auto'} title="放大时间尺度">
-            <ZoomIn size={16} />
-          </button>
-          {hasTimelineWindow && (
-            <button className="secondary" onClick={onResetTimelineWindow}>
-              返回全局
-            </button>
-          )}
-          <button className="secondary" disabled={seedingWorkItems || timelineLength === 0} onClick={onSeedWordClouds}>
-            {seedingWorkItems ? <Loader2 className="spin" size={16} /> : <Search size={16} />} 词云预聚合
-          </button>
-        </div>
-      </div>
+      <span className="timelineModeLabel">{timelineWindowLabel} · {granularity === 'auto' ? `自动/${granularityLabel(resolvedGranularity)}` : granularityLabel(resolvedGranularity)}</span>
+      {hasTimelineWindow && (
+        <button className="secondary" onClick={onResetTimelineWindow}>
+          返回全局
+        </button>
+      )}
     </div>
   );
 }
 
 export function TimelineActionDock({
-  hasActiveRange,
   seedingSummaries,
   creatingMergeSummary,
   summaryReady,
+  summaryMissing,
   creatingBranch,
   hasBranchPreview,
+  granularity,
+  visibleGranularities,
+  canUseFineGranularity,
+  zoomIndex,
+  zoomStepsLength,
+  seedingWorkItems,
+  timelineLength,
+  onGranularityChange,
+  onZoom,
+  onSeedWordClouds,
   onDrill,
   onSeedSummaries,
   onCreateMergeSummary,
   onSaveBranch,
 }: {
-  hasActiveRange: boolean;
   seedingSummaries: boolean;
   creatingMergeSummary: boolean;
   summaryReady: boolean;
+  summaryMissing: number;
   creatingBranch: boolean;
   hasBranchPreview: boolean;
+  granularity: 'auto' | TimelineGranularity;
+  visibleGranularities: ReadonlyArray<'auto' | TimelineGranularity>;
+  canUseFineGranularity: boolean;
+  zoomIndex: number;
+  zoomStepsLength: number;
+  seedingWorkItems: boolean;
+  timelineLength: number;
+  onGranularityChange: (value: 'auto' | TimelineGranularity) => void;
+  onZoom: (direction: 'in' | 'out') => void;
+  onSeedWordClouds: () => void;
   onDrill: () => void;
   onSeedSummaries: () => void;
   onCreateMergeSummary: () => void;
@@ -105,11 +71,40 @@ export function TimelineActionDock({
 }) {
   return (
     <div className="timelineActionDock" aria-label="当前片段操作">
-      <button className="secondary" disabled={!hasActiveRange} onClick={onDrill}>
+      <select
+        className="granularitySelect"
+        value={granularity}
+        onChange={(event) => onGranularityChange(event.target.value as 'auto' | TimelineGranularity)}
+        title="时间粒度"
+      >
+        {visibleGranularities.map((value) => {
+          const disabled = value !== 'auto' && isFineGranularity(value) && !canUseFineGranularity;
+          return (
+            <option key={value} value={value} disabled={disabled}>
+              {granularityLabel(value)}
+            </option>
+          );
+        })}
+      </select>
+      <button className="secondary iconOnly" onClick={() => onZoom('out')} disabled={zoomIndex <= 0 && granularity !== 'auto'} title="缩小时间尺度">
+        <ZoomOut size={16} />
+      </button>
+      <button className="secondary iconOnly" onClick={() => onZoom('in')} disabled={zoomIndex >= zoomStepsLength - 1 && granularity !== 'auto'} title="放大时间尺度">
+        <ZoomIn size={16} />
+      </button>
+      <button className="secondary" disabled={seedingWorkItems || timelineLength === 0} onClick={onSeedWordClouds}>
+        {seedingWorkItems ? <Loader2 className="spin" size={16} /> : <Search size={16} />} 词云
+      </button>
+      <button className="secondary" disabled={timelineLength === 0} onClick={onDrill}>
         <ZoomIn size={16} /> 下钻
       </button>
-      <button className="secondary" disabled={seedingSummaries || !hasActiveRange} onClick={onSeedSummaries}>
-        {seedingSummaries ? <Loader2 className="spin" size={16} /> : <FileText size={16} />} 摘要
+      <button
+        className="secondary"
+        disabled={seedingSummaries || timelineLength === 0}
+        onClick={onSeedSummaries}
+        title="生成当前可见时间线下所有子周期摘要"
+      >
+        {seedingSummaries ? <Loader2 className="spin" size={16} /> : <FileText size={16} />} {summaryMissing > 0 ? `全部摘要 ${summaryMissing}` : '全部摘要'}
       </button>
       <button
         className="secondary"

@@ -23,6 +23,16 @@ sslmode = "disable"
 timezone = "Asia/Shanghai"
 application_name = "record_analysis"
 
+[opensearch_config]
+domain = "localhost"
+scheme = "http"
+user = "admin"
+password = "RecordAnalysis1!"
+lark_msg_index = "record_analysis_messages"
+lark_chunk_index = "record_analysis_summaries"
+lark_card_action_index = "record_analysis_card_actions"
+record_branch_index = "record_analysis_branches"
+
 [minio_config]
 bucket = "record-analysis"
 ak = "replace-with-access-key"

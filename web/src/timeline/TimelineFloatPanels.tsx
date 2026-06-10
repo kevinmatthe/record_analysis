@@ -43,7 +43,8 @@ export function TimelineFloatPanels({
       <div className="timelineFloatDock" aria-label="时间线浮动面板">
         {(['scope', 'bucket', 'evidence'] as const).map((panel) => (
           <button key={panel} className={openPanel === panel ? 'active' : ''} onClick={() => onTogglePanel(panel)}>
-            {panel === 'scope' ? '当前片段' : panel === 'bucket' ? '时间桶' : '证据'}
+            <strong>{panel === 'scope' ? messageCount : panel === 'bucket' ? selectedBucket?.message_count ?? 0 : evidencePage?.total ?? 0}</strong>
+            <span>{panel === 'scope' ? '当前片段' : panel === 'bucket' ? '时间桶' : '证据'}</span>
           </button>
         ))}
       </div>
@@ -155,6 +156,7 @@ export function TimelineFloatPanels({
 function formatDate(value: string) {
   if (!value || value.startsWith('0001-')) return '未知时间';
   return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',

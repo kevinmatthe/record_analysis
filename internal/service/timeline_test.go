@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -123,5 +124,26 @@ func TestPreviewBranchCoversEntireRequestedRange(t *testing.T) {
 	}
 	if !preview.StartTime.Equal(time.Date(2026, 6, 1, 0, 0, 0, 0, time.Local)) || !preview.EndTime.Equal(time.Date(2026, 6, 4, 0, 0, 0, 0, time.Local)) {
 		t.Fatalf("preview range = %s - %s", preview.StartTime, preview.EndTime)
+	}
+}
+
+func TestPreviewBranchTopicHintDescribesBranchInsteadOfRawMessage(t *testing.T) {
+	messages := []model.Message{
+		{ID: "MSG_000001", Sender: "PERSON_A", MsgTime: time.Date(2026, 6, 1, 10, 5, 0, 0, time.Local), Content: "没人能一眼看懂的原始消息标题"},
+		{ID: "MSG_000002", Sender: "PERSON_B", MsgTime: time.Date(2026, 6, 1, 10, 20, 0, 0, time.Local), Content: "继续讨论"},
+	}
+
+	preview, err := PreviewBranch(messages, "hour", time.Date(2026, 6, 1, 10, 0, 0, 0, time.Local), time.Date(2026, 6, 1, 11, 0, 0, 0, time.Local))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.TopicHint == "" {
+		t.Fatal("expected branch topic hint")
+	}
+	if preview.TopicHint == messages[0].Content {
+		t.Fatalf("topic hint used raw message: %q", preview.TopicHint)
+	}
+	if want := "2条消息"; !strings.Contains(preview.TopicHint, want) {
+		t.Fatalf("topic hint = %q, want it to contain %q", preview.TopicHint, want)
 	}
 }

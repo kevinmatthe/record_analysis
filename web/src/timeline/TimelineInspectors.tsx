@@ -1,18 +1,184 @@
 import { lazy, Suspense } from 'react';
 import { Activity, Clock3, Database, Loader2, X } from 'lucide-react';
-import type { AnalysisBranch, AnalysisWorkItem } from '../api';
+import type { AnalysisBranch, AnalysisWorkItem, TimelineBucket } from '../api';
 
 const MarkdownRenderer = lazy(() => import('react-markdown'));
+
+export type TimelineDetailSelection =
+  | { kind: 'branch'; branch: AnalysisBranch }
+  | { kind: 'insight'; item: AnalysisWorkItem }
+  | { kind: 'bucket'; bucket: TimelineBucket; coverageText: string; wordCloudTaskCount: number }
+  | {
+      kind: 'range';
+      range: { start: string; end: string };
+      title: string;
+      messageCount: number;
+      bucketCount: number;
+      coverageText: string;
+      wordCloudTaskCount: number;
+      tokenCount: number;
+      hint: string;
+    };
+
+export function TimelineDetailPanel({
+  selection,
+  runningBranchID,
+  onRunBranch,
+  onPrioritize,
+  onEvidence,
+  onExpandBranch,
+  onClose,
+}: {
+  selection: TimelineDetailSelection | null;
+  runningBranchID: string | null;
+  onRunBranch: (branch: AnalysisBranch) => void;
+  onPrioritize: (item: AnalysisWorkItem) => void;
+  onEvidence: (ids: string[]) => void;
+  onExpandBranch: (branch: AnalysisBranch) => void;
+  onClose: () => void;
+}) {
+  if (!selection) {
+    return (
+      <aside className="branchInspector emptyInspector">
+        <div className="branchInspectorHeader">
+          <div>
+            <span>详情</span>
+            <strong>未选中节点</strong>
+          </div>
+        </div>
+        <p>点击时间线节点、框选一段时间，或打开 Branch / 洞察节点查看详情。</p>
+      </aside>
+    );
+  }
+  switch (selection.kind) {
+    case 'branch':
+      return <BranchInspector branch={selection.branch} runningBranchID={runningBranchID} onRun={onRunBranch} onExpand={onExpandBranch} onClose={onClose} />;
+    case 'insight':
+      return <InsightInspector item={selection.item} onPrioritize={onPrioritize} onEvidence={onEvidence} onClose={onClose} />;
+    case 'bucket':
+      return <BucketDetailPanel bucket={selection.bucket} coverageText={selection.coverageText} wordCloudTaskCount={selection.wordCloudTaskCount} onClose={onClose} />;
+    case 'range':
+      return <RangeDetailPanel selection={selection} onClose={onClose} />;
+  }
+}
+
+function BucketDetailPanel({
+  bucket,
+  coverageText,
+  wordCloudTaskCount,
+  onClose,
+}: {
+  bucket: TimelineBucket;
+  coverageText: string;
+  wordCloudTaskCount: number;
+  onClose: () => void;
+}) {
+  return (
+    <aside className="branchInspector bucketInspector">
+      <div className="branchInspectorHeader">
+        <div>
+          <span>时间桶</span>
+          <strong>{formatDate(bucket.start_time)} - {formatDate(bucket.end_time)}</strong>
+        </div>
+        <button className="secondary iconOnly" onClick={onClose} title="关闭详情面板">
+          <X size={16} />
+        </button>
+      </div>
+      <div className="branchInspectorMeta">
+        <span>
+          <Database size={14} /> {bucket.message_count} msgs
+        </span>
+        <span>
+          <Activity size={14} /> {statusText(bucket.analysis_status)}
+        </span>
+        <span>
+          <Clock3 size={14} /> 摘要 {statusText(bucket.summary_status)}
+        </span>
+        <span>
+          <Clock3 size={14} /> 词云 {statusText(bucket.word_cloud_status)}
+        </span>
+      </div>
+      <p className="branchInspectorSummary">{bucket.summary_title || bucket.preview || '当前时间桶还没有稳定摘要。'}</p>
+      {bucket.summary_topics && bucket.summary_topics.length > 0 && (
+        <div className="topicChips">
+          {bucket.summary_topics.slice(0, 8).map((topic) => (
+            <span key={topic}>{topic}</span>
+          ))}
+        </div>
+      )}
+      <div className="floatMetricGrid">
+        <div>
+          <span>参与人</span>
+          <strong>{bucket.participant_count}</strong>
+        </div>
+        <div>
+          <span>Tokens</span>
+          <strong>{bucket.total_tokens || 0}</strong>
+        </div>
+        <div>
+          <span>子摘要</span>
+          <strong>{coverageText}</strong>
+        </div>
+        <div>
+          <span>词云任务</span>
+          <strong>{wordCloudTaskCount}</strong>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function RangeDetailPanel({
+  selection,
+  onClose,
+}: {
+  selection: Extract<TimelineDetailSelection, { kind: 'range' }>;
+  onClose: () => void;
+}) {
+  return (
+    <aside className="branchInspector rangeInspector">
+      <div className="branchInspectorHeader">
+        <div>
+          <span>{selection.title}</span>
+          <strong>{formatDate(selection.range.start)} - {formatDate(selection.range.end)}</strong>
+        </div>
+        <button className="secondary iconOnly" onClick={onClose} title="关闭详情面板">
+          <X size={16} />
+        </button>
+      </div>
+      <div className="branchInspectorMeta">
+        <span>
+          <Database size={14} /> {selection.messageCount} msgs
+        </span>
+        <span>
+          <Activity size={14} /> {selection.bucketCount} buckets
+        </span>
+        <span>
+          <Clock3 size={14} /> 摘要 {selection.coverageText}
+        </span>
+        <span>
+          <Clock3 size={14} /> 词云 {selection.wordCloudTaskCount}
+        </span>
+        <span>
+          <Clock3 size={14} /> {selection.tokenCount} tokens
+        </span>
+      </div>
+      <p className="branchInspectorSummary">{selection.hint}</p>
+    </aside>
+  );
+}
 
 export function BranchInspector({
   branch,
   runningBranchID,
   onRun,
+  onExpand,
   onClose,
 }: {
   branch: AnalysisBranch | null;
   runningBranchID: string | null;
   onRun: (branch: AnalysisBranch) => void;
+  onExpand?: (branch: AnalysisBranch) => void;
   onClose: () => void;
 }) {
   if (!branch) {
@@ -59,6 +225,11 @@ export function BranchInspector({
         <button className="primary" disabled={running || branch.message_count <= 0} onClick={() => onRun(branch)}>
           {running ? <Loader2 className="spin" size={16} /> : <Activity size={16} />} 运行分析
         </button>
+        {onExpand && (
+          <button className="secondary" onClick={() => onExpand(branch)}>
+            全屏阅读全文
+          </button>
+        )}
         <span className="branchStage">{branch.message_count <= 0 ? '当前片段没有可分析消息' : branch.stage || '等待分析'}</span>
       </div>
       {branch.error && <div className="error">{branch.error}</div>}
@@ -78,10 +249,12 @@ export function BranchInspector({
 export function InsightInspector({
   item,
   onPrioritize,
+  onEvidence,
   onClose,
 }: {
   item: AnalysisWorkItem | null;
   onPrioritize: (item: AnalysisWorkItem) => void;
+  onEvidence: (ids: string[]) => void;
   onClose: () => void;
 }) {
   if (!item) {
@@ -126,6 +299,20 @@ export function InsightInspector({
               ))}
             </ul>
           )}
+          {summary.evidence_msg_ids?.length > 0 && (
+            <div className="evidenceChips">
+              {summary.evidence_msg_ids.slice(0, 8).map((id) => (
+                <button key={id} className="secondary" onClick={() => onEvidence([id])}>
+                  {id}
+                </button>
+              ))}
+              {summary.evidence_msg_ids.length > 1 && (
+                <button className="primary" onClick={() => onEvidence(summary.evidence_msg_ids)}>
+                  查看证据
+                </button>
+              )}
+            </div>
+          )}
           {summary.uncertainty && <small>{summary.uncertainty}</small>}
         </article>
       ) : terms.length > 0 ? (
@@ -153,6 +340,7 @@ export function InsightInspector({
 function formatDate(value: string) {
   if (!value || value.startsWith('0001-')) return '未知时间';
   return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',

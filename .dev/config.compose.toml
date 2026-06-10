@@ -11,11 +11,13 @@ application_name = "record_analysis"
 [opensearch_config]
 # Optional. When unavailable, API keeps using Postgres timeline/search fallbacks.
 domain = "opensearch"
+scheme = "http"
 user = "admin"
-password = "admin"
+password = "RecordAnalysis1!"
 lark_msg_index = "record_analysis_messages"
 lark_chunk_index = "record_analysis_summaries"
 lark_card_action_index = "record_analysis_card_actions"
+record_branch_index = "record_analysis_branches"
 
 # MinIO is intentionally omitted for the default compose profile. The service
 # falls back to the local object store mounted at /app/.data/objects.
